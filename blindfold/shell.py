@@ -112,7 +112,6 @@ _PLAIN_PATH = re.compile(r"(?:~/)?[A-Za-z0-9_./@%+,:=-]+")
 # other way (sh x, cat x | sh, sh < x, cp x …) may run it.
 _READERS = {"wc", "cat", "head", "tail", "grep", "egrep", "less", "ls", "stat", "file", "diff", "md5", "shasum", "test", "["}
 _GIT_READS = {"add", "diff", "status", "log", "show"}
-_SUBSTITUTION = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 
 
 def is_plain_file(target: str) -> bool:
@@ -132,7 +131,9 @@ def _only_reads(command: str, name: str, piped_on: bool) -> bool:
     after `git`, so no -c or --exec-path)."""
     verb, words = _verb(command)
     reads = verb in _READERS or (verb == "git" and len(words) > 1 and words[1] in _GIT_READS)
-    rest = re.sub(r"<\s*[^\s<>|;&]*" + re.escape(name) + r"(?![\w.-])", "", command)
+    if "<(" in command or ">(" in command:
+        return False
+    rest = re.sub(r"<\s*(?:~/)?[A-Za-z0-9_./@%+,:=-]*" + re.escape(name) + r"(?![\w.-])", "", command)
     return reads and not piped_on and not re.search(r"[<>]", rest)
 
 
@@ -147,7 +148,7 @@ def runs_file(later: List[Tuple[str, str]], path: str) -> bool:
     for part, separator in later:
         if name not in part:
             continue
-        if any(name in match.group(0) for match in _SUBSTITUTION.finditer(part)) or "$(" in part or "`" in part:
+        if any(mark in part for mark in ("$(", "`", "<(", ">(")):
             return True
         if not _only_reads(first_line(part), name, separator == "|"):
             return True
