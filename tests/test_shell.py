@@ -52,12 +52,18 @@ class Parts(unittest.TestCase):
         for target in ("{a,b}", "x[1]", "~root/x", "!x", "/dev/stdout", "/proc/1/fd/1", "*.md", "$OUT"):
             self.assertFalse(shell.is_plain_file(target), target)
 
-    def test_a_later_part_runs_a_file_only_through_a_runner(self):
+    def test_any_later_use_of_a_written_file_counts_as_running_it_except_a_plain_read(self):
+        def runs(later):
+            return shell.runs_file(shell.split(later), "x.sh")
+
         for later in ("bash x.sh", "sh -e ./x.sh", ". ./x.sh", "source x.sh", "./x.sh", "python3 x.sh",
-                      "echo $(sh x.sh)", "env FOO=1 bash x.sh"):
-            self.assertTrue(shell.runs_file(later, "x.sh"), later)
-        for later in ("wc -l < x.sh", "cat x.sh", "git add x.sh", "echo done", "bash y.sh", "ls x.sh.bak"):
-            self.assertFalse(shell.runs_file(later, "x.sh"), later)
+                      "echo $(sh x.sh)", "env FOO=1 bash x.sh", "cat x.sh | sh", "sh < x.sh", "sh<x.sh",
+                      "cp x.sh /tmp/y && /tmp/y", "chmod +x x.sh", "mv x.sh run", "xargs -a x.sh rm",
+                      "cat x.sh > /tmp/y.sh"):
+            self.assertTrue(runs(later), later)
+        for later in ("wc -l < x.sh", "cat x.sh", "git add x.sh", "echo done", "bash y.sh",
+                      'echo "lines: $(wc -l < x.sh)"', "grep -c foo x.sh", "ls -la x.sh"):
+            self.assertFalse(runs(later), later)
 
     def test_heads_and_write_targets(self):
         self.assertEqual(shell.head("A=1 B=2 /usr/bin/env python3 x"), "env")

@@ -158,9 +158,8 @@ def _command_reason(command: str, cwd: Optional[str], protected: List[str], sett
         if key_written:
             return f"it writes {DISABLE_HOOKS} and then runs more"
         targets = _data_targets(part, here)
-        later = "\n".join(p for p, _ in pairs[index + 1 :]) if targets else ""
         elsewhere = targets is not None and not any(
-            _named(t, guarded) or _inside(t, guarded) or shell.runs_file(later, t) for t in targets
+            _named(t, guarded) or _inside(t, guarded) or shell.runs_file(pairs[index + 1 :], t) for t in targets
         )
         if DISABLE_HOOKS.lower() in part.lower():
             if not elsewhere or any(_SETTINGS_FILE.search(t) for t in targets or []):

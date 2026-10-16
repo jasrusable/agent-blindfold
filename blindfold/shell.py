@@ -108,9 +108,11 @@ def runs_substitution(part: str) -> bool:
 
 
 _PLAIN_PATH = re.compile(r"(?:~/)?[A-Za-z0-9_./@%+,:=-]+")
-# A later part that runs a file: sh x, python3 x, source x, . x, ./x, or one
-# of those inside $(…).
-_RUNNER = r"(?:(?:^|[\s;&|(`])(?:sh|bash|zsh|dash|ksh|fish|source|exec|eval|env|xargs|python[0-9.]*|node|deno|bun|ruby|perl|php|osascript)\s+(?:\S+\s+){0,8}?|(?:^|\s)\.\s+|\./)"
+# Commands that only read a file. A later part that names a written file any
+# other way (sh x, cat x | sh, sh < x, cp x …) may run it.
+_READERS = {"wc", "cat", "head", "tail", "grep", "egrep", "less", "ls", "stat", "file", "diff", "md5", "shasum", "test", "["}
+_GIT_READS = {"add", "diff", "status", "log", "show"}
+_SUBSTITUTION = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 
 
 def is_plain_file(target: str) -> bool:
@@ -119,10 +121,33 @@ def is_plain_file(target: str) -> bool:
     return bool(_PLAIN_PATH.fullmatch(target)) and not target.startswith(("/dev/", "/proc/"))
 
 
-def runs_file(text: str, path: str) -> bool:
-    """Whether text runs the file at path (by its name)."""
+def _only_reads(command: str, name: str, piped_on: bool) -> bool:
+    words = command.split()
+    while words and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+        words = words[1:]
+    verb = words[0].rsplit("/", 1)[-1] if words else ""
+    reads = verb in _READERS or (verb == "git" and any(w in _GIT_READS for w in words[1:3]))
+    return reads and not piped_on and not re.search(r"(?:^|\s)[<>]", command.replace(f"< {name}", "").replace(f"<{name}", ""))
+
+
+def runs_file(later: List[Tuple[str, str]], path: str) -> bool:
+    """Whether a later part may run the file at path: anything that names it
+    except a plain read (wc -l < x, cat x, git add x), also inside $(…)."""
     name = path.rsplit("/", 1)[-1]
-    return bool(name) and re.search(_RUNNER + r"\S*" + re.escape(name) + r"(?![\w.-])", text) is not None
+    if not name:
+        return True
+    for part, separator in later:
+        if name not in part:
+            continue
+        outer = part
+        for match in _SUBSTITUTION.finditer(part):
+            inner = match.group(1) if match.group(1) is not None else match.group(2)
+            if name in inner and not _only_reads(inner.strip(), name, "|" in inner):
+                return True
+            outer = outer.replace(match.group(0), "")
+        if name in outer and not _only_reads(first_line(outer), name, separator == "|"):
+            return True
+    return False
 
 
 def writes_heredoc_to_file(part: str) -> bool:
@@ -145,8 +170,7 @@ def strip_data_heredocs(command: str) -> str:
     for index, (part, separator) in enumerate(pairs):
         data = writes_heredoc_to_file(part) and separator != "|"
         if data:
-            later = "\n".join(p for p, _ in pairs[index + 1 :])
-            data = not any(runs_file(later, target) for target in write_targets(part))
+            data = not any(runs_file(pairs[index + 1 :], target) for target in write_targets(part))
         kept.append(first_line(part) if data else part)
     return "\n".join(kept)
 
