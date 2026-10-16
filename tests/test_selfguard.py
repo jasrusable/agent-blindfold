@@ -59,7 +59,9 @@ class SelfGuard(unittest.TestCase):
 
     def test_turning_hooks_off_is_refused_anywhere(self):
         self.assertTrue(self.reason({"file_path": f"{self.root}/proj/.claude/settings.json", "content": '{"disableAllHooks": true}'}))
-        self.assertTrue(self.reason({"command": f"jq '.disableAllHooks = true' {self.root}/s.json > /tmp/x"}))
+        key = "disable" + "AllHooks"
+        self.assertTrue(self.reason({"command": f"jq '.{key} = true' {self.settings} > t && mv t {self.settings}"}))
+        self.assertTrue(self.reason({"command": f"echo '{{\"{key}\": true}}' > proj/.claude/settings.json"}))
         self.assertIsNone(self.reason({"command": f"grep -rn disableAllHooks {self.root}"}))
 
     def test_commands_that_could_change_blindfold_are_refused(self):
@@ -67,12 +69,12 @@ class SelfGuard(unittest.TestCase):
         dollar_home = "$HOME" + home_form[1:]
         for command in (
             f"git -C {install} pull", f"git -C {home_form} checkout -- blindfold", f"rm -rf {dollar_home}",
-            f"cat {install}/x > /tmp/y", f"ls {install} | xargs rm", f"{install}/bin/blindfold install --apply",
+            f"find {install} -name '*.pyc' | xargs rm", f"ls {install} | while read f; do rm $f; done", f"{install}/bin/blindfold install --apply",
             f"cd {install} && make", f"echo $(cat {install}/x)", f"sed -i '' 's/a/b/' {self.config}/config.json",
             f"chmod -R u+w {install}", f"find {install} -name '*.py' -delete", f"cp evil.py {self.link}/x.py",
             f"sed -i '' '/blindfold/d' {self.settings}", f"cat > {self.settings} <<'EOF'\n{{\"permissions\": {{}}}}\nEOF",
             f"python3 -c 'print(1)' > {self.settings}", f'grep x {install}/y "$(rm -rf {install})"',
-            f"grep 'unbalanced {install}/y > z", f"cat {install}/x '|' > out",
+            f"grep 'unbalanced {install}/y > z",
         ):
             with self.subTest(command=command):
                 self.assertTrue(self.reason({"command": command}))
@@ -85,10 +87,33 @@ class SelfGuard(unittest.TestCase):
             f"echo '{{}}' | {install}/bin/blindfold hook", f"cd {install} && git status", f"wc -l {self.config}/config.json 2>&1",
             f"jq . {self.settings}", "rm -rf build/",
             f'{install}/bin/blindfold selftest --installed --agent claude 2>&1 | grep -E "hooks run|PASS|FAIL"',
-            f"grep -n 'a > b; c' {install}/x", f'grep "say \\"hi\\" | there" {install}/x',
+            f"grep -n 'a > b; c' {install}/x", f"cat {install}/x > /tmp/y", f"cat {install}/x '|' > out", f'grep "say \\"hi\\" | there" {install}/x',
         ):
             with self.subTest(command=command):
                 self.assertIsNone(self.reason({"command": command}))
+
+    def test_notes_that_mention_a_protected_path_are_not_uses(self):
+        install = self.install
+        for command in (
+            f"cat >> notes.md <<'EOF'\nUpdate with: git -C {install} pull\nEOF",
+            f"echo 'installed at {install}' > /tmp/where.txt",
+            f"printf '%s\\n' {install} >> log.txt",
+        ):
+            with self.subTest(command=command[:40]):
+                self.assertIsNone(self.reason({"command": command}))
+
+    def test_but_writing_into_one_or_running_code_that_names_one_is_refused(self):
+        install = self.install
+        for command in (
+            f"cat > {install}/blindfold/rules.py <<'EOF'\nx = 1\nEOF",
+            f"echo x | tee {install}/x",
+            f"python3 - <<'EOF'\nopen('{install}/x', 'w').write('')\nEOF",
+            f"node -e \"require('fs').rmSync('{install}', {{recursive: true}})\"",
+            f"cd {install}; rm -rf blindfold", f"cd /tmp && cd {install} && git reset --hard",
+        ):
+            with self.subTest(command=command[:40]):
+                self.assertTrue(self.reason({"command": command}))
+        self.assertIsNone(self.reason({"command": f"cd {install} && cd /tmp && rm -rf scratch"}))
 
     def test_a_command_run_inside_a_protected_path_is_judged_by_its_cwd(self):
         self.assertTrue(self.reason({"command": "git pull"}, cwd=self.install))

@@ -71,15 +71,30 @@ Before each call, blindfold refuses one that would change blindfold itself:
 - **Settings edits** that touch blindfold's entries in `~/.claude/settings.json` or
   `settings.local.json`, or a full write that drops them. Other settings edits
   are fine.
-- **Turning hooks off:** `disableAllHooks` written anywhere, by any tool.
-- **Shell commands** that name one of those paths, or the agent settings file,
-  or run from inside one, unless every part is read-only (`ls`, `cat`, `grep`,
-  `git log`, `blindfold doctor`, and the like, with no output redirection).
+- **Turning hooks off:** `disableAllHooks` written into a settings file, by any tool.
+- **Shell commands that use a protected path:** writing into it, running
+  inside it (`cd` included), feeding its files to `xargs`, a shell or a loop,
+  or running code (Python, Node, …) that names it. Read-only parts (`ls`,
+  `cat`, `grep`, `git log`, `blindfold doctor`, …) are fine, and so is text that
+  only mentions a path: a note or doc written with `cat`, `tee`, `echo` or
+  `printf` to a file elsewhere. Shell rewrites of the agent settings file are
+  refused; the file-edit tools are checked precisely instead.
+
+Commands are split the way the shell splits them (quotes, escapes,
+here-documents), so a `|` inside a grep pattern or a path inside a heredoc of
+notes isn't mistaken for use. The same applies to the blocked commands: a
+heredoc saved to a file is data, while one piped into a shell is judged.
 
 Changes to blindfold go through the user, who can type `! <command>`. Your
 development checkout is not protected; only the copy the hook runs from is.
 Like the command denylist, this stops accidents, not an agent set on getting
 round it (a path it builds at runtime isn't seen).
+
+### Placeholders in docs
+
+The placeholder guard refuses writing a placeholder into a file, since it
+would replace the real value. Markdown docs (`.md`, `.mdx`, `.rst`) are the
+exception: there a placeholder is an example.
 
 ## Configuration reference
 

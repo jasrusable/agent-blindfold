@@ -97,6 +97,7 @@ PLACEHOLDER_VALUE = re.compile(
     r"""^(?:
         |true|false|null|none|nil|undefined|yes|no|on|off|empty|unset|required|optional
         |x+|\*+|\.+|-+|\#+|changeme|change[_-]?me|example|sample|dummy|test|testing|redacted|secret|password
+        |values?|val|placeholder|foo|bar|baz|foobar
         |your[_-].*|<.*>|\[.*\]|\$\{.*\}|\$\(.*\)|\$[A-Za-z_][A-Za-z0-9_]*|%\(.*\)s|%s|\{\{.*\}\}|\{.*\}
         |process\.env\..*|import\.meta\.env\..*|os\.environ.*|env\(.*\)|getenv\(.*\)|config\..*
         |string|str|number|int|integer|boolean|bool|any|object|bytes|buffer|secretstr
@@ -108,6 +109,7 @@ _CALL = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.]*\(.*\)$")
 _ATTRIBUTE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+$")
 # Code: a call, type, arrow function, generic, object or array literal.
 _CODE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.]*\(|^[(\[{]|=>|<|\bawait\b|\bnew [A-Z]|\btypeof\b")
+_SEQUENCE = re.compile(r"^[(\[]\s*(?:[\"'(\[]|[A-Za-z_]\w*\s*,)")
 _IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$")
 # A slug, word or path: letters and separators only, no digits.
 _SLUG = re.compile(r"^/?[A-Za-z]+(?:[-_./:][A-Za-z]+)*/?$")
@@ -125,7 +127,8 @@ _CODE_LINE = re.compile(r"\b(?:const|let|var|return|function|await|typeof|instan
 def is_placeholder(value: str) -> bool:
     """Whether a value found next to a secret-looking name is clearly not a secret."""
     stripped = value.strip()
-    return len(stripped) < 4 or bool(PLACEHOLDER_VALUE.match(stripped))
+    # Prose punctuation after a stand-in word ("--password value, …") isn't part of it.
+    return len(stripped) < 4 or bool(PLACEHOLDER_VALUE.match(stripped)) or bool(PLACEHOLDER_VALUE.match(stripped.rstrip(".,;:!?")))
 
 
 def is_code_line(line: str) -> bool:
@@ -162,8 +165,10 @@ def is_secretish(value: str, context: str) -> bool:
     if is_placeholder(stripped):
         return False
     if context == "strong":
-        # A call or an attribute reference (settings.DB_PASSWORD) is code.
-        return not (_CALL.match(stripped) or _ATTRIBUTE.match(stripped))
+        # A call, an attribute reference (settings.DB_PASSWORD) or a list or
+        # tuple literal (RESULT_KEYS = ("a", "b")) is code. A secret inside a
+        # literal is still caught by the vendor and entropy rules.
+        return not (_CALL.match(stripped) or _ATTRIBUTE.match(stripped) or _SEQUENCE.match(stripped))
     if _CODE.search(stripped) or _VERSION.match(stripped):
         return False
     if _COMMAND.match(stripped) and _COMMAND_MARKER.search(stripped):

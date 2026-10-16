@@ -17,7 +17,7 @@ from .mask import PLACEHOLDER_RE, Finding
 from .rules import PROMPT_BLOCKING_KINDS
 from .runtime import Runtime
 from .structure import mask_value, withhold
-from . import selfguard, transcript
+from . import selfguard, shell, transcript
 
 Reply = Optional[Dict[str, Any]]
 
@@ -121,8 +121,22 @@ def _command(event: Event) -> Optional[str]:
 
 
 def _is_blocked_command(event: Event, patterns: List[str]) -> bool:
+    """A heredoc fed to cat or tee is data (docs, notes), so it isn't judged."""
     command = _command(event)
-    return command is not None and any(re.search(pattern, command, re.MULTILINE) for pattern in patterns)
+    if command is None:
+        return False
+    judged = shell.strip_data_heredocs(command)
+    return any(re.search(pattern, judged, re.MULTILINE) for pattern in patterns)
+
+
+_DOC_FILE = re.compile(r"\.(?:md|mdx|markdown|rst)$", re.IGNORECASE)
+
+
+def _writes_docs(event: Event) -> bool:
+    """A file tool writing a doc, where a placeholder is an example, not a stand-in for a value."""
+    tool_input = event.tool_input if isinstance(event.tool_input, dict) else {}
+    paths = [v for k in ("file_path", "filePath", "path", "target_file") for v in [tool_input.get(k)] if isinstance(v, str)]
+    return "command" not in tool_input and bool(paths) and all(_DOC_FILE.search(p) for p in paths)
 
 
 # When the full check failed (or ran out of time), a linear-time stand-in: any
@@ -141,7 +155,8 @@ def pre_tool_use(event: Event, rt: Runtime) -> Reply:
             "blindfold's installed code, config, key, skill or hook settings, so masking can't be switched off by "
             "accident. Tell the user the exact change and let them make it (they can type `! <command>`)."
         )
-    if rt.config.guard_placeholders and not event.is_read_only_tool and any(PLACEHOLDER_RE.search(t) for t in texts):
+    guard = rt.config.guard_placeholders and not event.is_read_only_tool and not _writes_docs(event)
+    if guard and any(PLACEHOLDER_RE.search(t) for t in texts):
         return _deny(
             "blindfold: this call contains a masked-secret placeholder (<blindfold kind= …>). The real value is what "
             "belongs there, so writing or sending the placeholder would replace or corrupt it, and an "

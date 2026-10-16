@@ -11,6 +11,7 @@ blindfold masks secrets in AI agents' tool output. It is security code that must
   - `blindfold/events.py`: one view of Claude and Grok events.
   - `blindfold/handlers.py`: one pure function per hook event.
   - `blindfold/selfguard.py`: refuses agent changes to blindfold itself (installed copy, config, key, skill, hook settings).
+  - `blindfold/shell.py`: just enough shell syntax (quotes, heredocs, separators) for the guards to tell a mention from a use.
   - `blindfold/runtime.py`: config and masker, with the safe fallback.
   - `blindfold/hook.py`: process I/O, never raises.
 - **Invariants (each one has tests):**

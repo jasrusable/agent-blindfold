@@ -219,3 +219,84 @@ MUST_NOT_MASK = [
     "- https://owasp.org/Top10/A03_2021-Injection/",
     "// It's a bearer token-like value: short-lived, single-use",
 ]
+
+# Ordinary code, config, logs and docs (invented, not from any real project):
+# what an agent reads all day. Every one of these must pass untouched.
+D5 = "-" * 5
+EVERYDAY = [
+    # Python
+    'RESULT_KEYS = ("tool_response", "toolResult")',
+    "SECRET_KEYS = frozenset({'password', 'token', 'api_key'})",
+    "PASSWORD_FIELDS = ['password', 'password_confirm']",
+    "TOKEN_TTL_SECONDS = 3600",
+    "self.api_key = api_key",
+    "def get_secret(name: str) -> str:",
+    "secret = client.get_secret_value(SecretId=secret_arn)['SecretString']",
+    "password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt())",
+    'parser.add_argument("--token", help="API token (or set APP_TOKEN)")',
+    'logger.info("refreshing access token for %s", user_id)',
+    "if not token:\n    raise AuthError('missing token')",
+    "API_KEY_HEADER = 'X-Api-Key'",
+    "auth_token_cookie_name = 'session'",
+    "SECRET_KEY = os.environ.get('SECRET_KEY')",
+    "jwt.decode(token, settings.JWT_SECRET, algorithms=['HS256'])",
+    # TypeScript / JS
+    "const { accessToken, refreshToken } = await refresh(session);",
+    "export const TOKEN_STORAGE_KEY = 'auth.token';",
+    "headers: { Authorization: `Bearer ${token}` },",
+    "const password = form.watch('password');",
+    "type Credentials = { username: string; password: string };",
+    "apiKey: process.env.OPENAI_API_KEY!,",
+    "secretKey: z.string().min(32),",
+    "if (err.code === 'invalid_api_key') return retry();",
+    "import { createHash, randomBytes } from 'node:crypto';",
+    "const key = `user:${userId}:prefs`;",
+    "queryKey: ['transactions', accountId, page],",
+    "cacheKey = hash(JSON.stringify(params))",
+    # Go / Rust
+    'token, err := auth.ParseToken(r.Header.Get("Authorization"))',
+    "let secret = env::var(\"APP_SECRET\").expect(\"APP_SECRET must be set\");",
+    # Config / YAML / CI
+    "password: ${DB_PASSWORD}",
+    "    token: ${{ secrets.GITHUB_TOKEN }}",
+    "      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}",
+    "secretKeyRef:\n  name: app-secrets\n  key: database-url",
+    "api_key: <%= ENV['API_KEY'] %>",
+    "auth:\n  strategy: oauth2\n  token_url: https://auth.example.com/oauth/token",
+    "DB_PASSWORD=",
+    "REDIS_URL=redis://localhost:6379",
+    "SENTRY_DSN=",
+    "JWT_EXPIRES_IN=7d",
+    "SESSION_COOKIE_NAME=sid",
+    # Lockfiles, hashes, ids
+    '"integrity": "sha512-' + "Aa1Bb2Cc3Dd4Ee5Ff6Gg7Hh8Ii9Jj0KkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz0123456789+/AbCdEfGhIjKlMnOpQrStUvWx==" + '",',
+    'resolved "https://registry.yarnpkg.com/lodash/-/lodash-4.17.21.tgz#679591c564c3bffaae8454cf0b3df370c3d6911c"',
+    "Merge: 1a2b3c4 5d6e7f8",
+    "fatal: ambiguous argument 'f1e2d3c4b5a6978877665544332211ffeeddccbb'",
+    "  migrations/20261016150000_add_points_balance.ts",
+    "trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=00f067aa0ba902b7",
+    "etag: W/\"5e9c-1f2a3b4c5d6e7f\"",
+    "uuid: 7c9e6679-7425-40de-944b-e07fc1f90ae7",
+    "Content-Security-Policy: script-src 'nonce-rAnd0mN0nc3' 'strict-dynamic'",
+    # Logs and tool output
+    "POST /auth/token 200 12ms",
+    "WARN token refresh failed: expired",
+    "[auth] password reset email sent",
+    "Error: Invalid API key provided: sk_test_****abcd",
+    "npm WARN deprecated request@2.88.2: request has been deprecated",
+    "Successfully installed cryptography-43.0.1",
+    "export PATH=\"$HOME/.local/bin:$PATH\"",
+    # Docs
+    "Set `STRIPE_SECRET_KEY` in your `.env` file.",
+    "The token is valid for 60 minutes.",
+    "Use a password manager; never reuse passwords.",
+    f"Paste the key between {D5}BEGIN PUBLIC KEY{D5} and {D5}END PUBLIC KEY{D5}.",
+    "  password: --password value, a name/value pair",
+    'DB_PASSWORD = os.environ["DB_PASSWORD"]  # see --password value',
+]
+MUST_NOT_MASK += EVERYDAY
+MUST_MASK += [
+    # A value that only looks like a literal: no quote or comma, so a secret.
+    ("DB_PASSWORD=(hunter2x)", "(hunter2x)"),
+    ("API_KEYS=[k8sL0ngR4nd0mT0k3nV4lu3Abc123xyz]", "k8sL0ngR4nd0mT0k3nV4lu3Abc123xyz"),
+]
