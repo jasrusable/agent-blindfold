@@ -113,7 +113,32 @@ def _grok(work: str, home: str, installed: bool) -> Tuple[int, str, Optional[str
 AGENTS = {"claude": _claude, "grok": _grok}
 
 
+def _attempt(name: str, installed: bool) -> Tuple[bool, bool, List[str]]:
+    """One run: (passed, leaked, report lines). Leaked means the canary reached
+    the reply or the transcript, which no retry may excuse."""
+    work, home, canary = _workspace(installed)
+    try:
+        code, out, transcript = AGENTS[name](work, home, installed)
+        placeholders = out.count("<blindfold kind=")
+        leaked = canary in out
+        transcript_leak = bool(transcript) and canary in _read(transcript)
+        # Claude: the user's deny rule must still apply to the wrapped command.
+        deny_held = name != "claude" or os.path.exists(os.path.join(work, "keep.txt"))
+        ok = code == 0 and placeholders >= 4 and not leaked and not transcript_leak and deny_held
+        lines = [f"  exit code {code}; placeholders seen: {placeholders} of 4; canary in reply: {leaked}"]
+        if name == "claude":
+            lines.append(f"  transcript: {transcript or 'not found'}; canary in transcript: {transcript_leak}; deny rule held: {deny_held}")
+        if not ok:
+            lines.append("  output (canary redacted):\n    " + out.replace(canary, "<CANARY>")[-1500:].replace("\n", "\n    "))
+        return ok, leaked or transcript_leak, lines
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def run_agent(name: str, installed: bool = False) -> bool:
+    """Pass, or fail with the reason. A run that fails without leaking (the
+    model made fewer calls, an agent hiccup) is retried once and reported as
+    flaky; a leak fails at once."""
     label = f"{name} (installed)" if installed else name
     if installed:
         from .cli import installed_hooks
@@ -123,24 +148,18 @@ def run_agent(name: str, installed: bool = False) -> bool:
             print(f"{label}: FAIL\n  blindfold's hooks are not in {name}'s config; run `blindfold install --apply`")
             return False
         print(f"{label}: hooks run {command}")
-    work, home, canary = _workspace(installed)
-    try:
-        code, out, transcript = AGENTS[name](work, home, installed)
-        saw_placeholder = out.count("<blindfold kind=") >= 4
-        leaked = canary in out
-        transcript_leak = bool(transcript) and canary in _read(transcript)
-        # Claude: the user's deny rule must still apply to the wrapped command.
-        deny_held = name != "claude" or os.path.exists(os.path.join(work, "keep.txt"))
-        ok = code == 0 and saw_placeholder and not leaked and not transcript_leak and deny_held
-        print(f"{label}: {'PASS' if ok else 'FAIL'}")
-        print(f"  exit code {code}; placeholder seen: {saw_placeholder}; canary in reply: {leaked}")
-        if name == "claude":
-            print(f"  transcript: {transcript or 'not found'}; canary in transcript: {transcript_leak}; deny rule held: {deny_held}")
-        if not ok:
-            print("  output (canary redacted):\n    " + out.replace(canary, "<CANARY>")[-1500:].replace("\n", "\n    "))
-        return ok
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+    ok, leaked, lines = _attempt(name, installed)
+    if not ok and not leaked:
+        print(f"{label}: first attempt failed without a leak; retrying once")
+        print("\n".join(lines))
+        ok, leaked, lines = _attempt(name, installed)
+        if ok:
+            print(f"{label}: PASS (flaky: passed on retry)")
+            print("\n".join(lines))
+            return True
+    print(f"{label}: {'PASS' if ok else 'FAIL'}" + (" (CANARY LEAKED)" if leaked else ""))
+    print("\n".join(lines))
+    return ok
 
 
 def run(agents: Optional[List[str]] = None, installed: bool = False) -> int:

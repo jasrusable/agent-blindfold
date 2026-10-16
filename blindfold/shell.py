@@ -121,18 +121,25 @@ def is_plain_file(target: str) -> bool:
     return bool(_PLAIN_PATH.fullmatch(target)) and not target.startswith(("/dev/", "/proc/"))
 
 
-def _only_reads(command: str, name: str, piped_on: bool) -> bool:
+def _verb(command: str) -> Tuple[str, List[str]]:
     words = command.split()
-    while words and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[0]):
-        words = words[1:]
-    verb = words[0].rsplit("/", 1)[-1] if words else ""
-    reads = verb in _READERS or (verb == "git" and any(w in _GIT_READS for w in words[1:3]))
-    return reads and not piped_on and not re.search(r"(?:^|\s)[<>]", command.replace(f"< {name}", "").replace(f"<{name}", ""))
+    return (words[0].rsplit("/", 1)[-1] if words else ""), words
+
+
+def _only_reads(command: str, name: str, piped_on: bool) -> bool:
+    """A plain read of the file: a reader verb with no assignment prefix, no
+    pipe onward and no redirect but `< file` (git: a read subcommand right
+    after `git`, so no -c or --exec-path)."""
+    verb, words = _verb(command)
+    reads = verb in _READERS or (verb == "git" and len(words) > 1 and words[1] in _GIT_READS)
+    rest = command.replace(f"< {name}", "").replace(f"<{name}", "")
+    return reads and not piped_on and not re.search(r"[<>]", rest)
 
 
 def runs_file(later: List[Tuple[str, str]], path: str) -> bool:
     """Whether a later part may run the file at path: anything that names it
-    except a plain read (wc -l < x, cat x, git add x), also inside $(…)."""
+    except a plain read (wc -l < x, cat x, git add x), also inside $(…) when
+    the outer command only prints (echo, printf) or reads."""
     name = path.rsplit("/", 1)[-1]
     if not name:
         return True
@@ -142,9 +149,12 @@ def runs_file(later: List[Tuple[str, str]], path: str) -> bool:
         outer = part
         for match in _SUBSTITUTION.finditer(part):
             inner = match.group(1) if match.group(1) is not None else match.group(2)
-            if name in inner and not _only_reads(inner.strip(), name, "|" in inner):
-                return True
             outer = outer.replace(match.group(0), "")
+            if name not in inner:
+                continue
+            outer_verb, _ = _verb(first_line(part))
+            if not _only_reads(inner.strip(), name, "|" in inner) or outer_verb not in _READERS | {"echo", "printf"}:
+                return True
         if name in outer and not _only_reads(first_line(outer), name, separator == "|"):
             return True
     return False
