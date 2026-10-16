@@ -112,7 +112,7 @@ def _blocked_command(event: Event, rt: Runtime) -> Optional[str]:
     command = event.tool_input.get("command") if isinstance(event.tool_input, dict) else None
     if not isinstance(command, str):
         return None
-    return next((pattern for pattern in rt.config.blocked_commands if re.search(pattern, command)), None)
+    return next((pattern for pattern in rt.config.blocked_commands if re.search(pattern, command, re.MULTILINE)), None)
 
 
 def pre_tool_use(event: Event, rt: Runtime) -> Reply:
@@ -215,8 +215,16 @@ def withheld_reply(event: Event) -> Reply:
                 "additionalContext": "blindfold failed while masking this output, so all of its text was withheld.",
             }
         }
+    # Before a call or prompt, a failure lets it through: the security boundary
+    # is masking the output afterwards (which still withholds on failure), and
+    # refusing everything would lock the user and every agent out over a bug.
     if event.name == "PreToolUse":
-        return _deny("blindfold failed while checking this call for secrets, so it was blocked. Ask the user to check `blindfold doctor`.")
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": "blindfold's pre-call check failed, so this call was allowed unchecked. Tell the user to run `blindfold doctor`.",
+            }
+        }
     if event.name == "UserPromptSubmit":
-        return {"decision": "block", "reason": "blindfold failed while checking this prompt for secrets, so it was blocked. Run `blindfold doctor`."}
+        return {"systemMessage": "⚠️ blindfold could not check this prompt for secrets (run `blindfold doctor`). It was sent unchecked."}
     return None

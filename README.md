@@ -81,11 +81,21 @@ agents, because it's exactly what an agent upgrade could break.
 Requires Python 3.9+, with no dependencies.
 
 ```sh
-git clone https://github.com/jasrusable/agent-blindfold ~/projects/agent-blindfold
-~/projects/agent-blindfold/bin/blindfold install            # dry run: shows the settings diff
-~/projects/agent-blindfold/bin/blindfold install --apply    # writes it (keeps a backup) and links the skill
-~/projects/agent-blindfold/bin/blindfold selftest --agent claude --agent grok
+git clone https://github.com/jasrusable/agent-blindfold ~/.local/share/agent-blindfold
+~/.local/share/agent-blindfold/bin/blindfold install            # dry run: shows the settings diff
+~/.local/share/agent-blindfold/bin/blindfold install --apply    # writes it (keeps a backup) and links the skill
+~/.local/share/agent-blindfold/bin/blindfold selftest --agent claude --agent grok
 ```
+
+Install from a clone you don't edit. The hook runs on every tool call of every
+agent session on the machine, so a half-edited working copy would break them
+all at once. Develop in a separate checkout, run the tests there, then update
+the installed clone with `git -C ~/.local/share/agent-blindfold pull`.
+
+If blindfold itself fails, it fails safe *before* a call (the call and your
+prompt go through, unchecked, with a warning) and closed *after* it (the
+output is withheld). A bug can make the agent blind for a while, but it can't
+lock you or the agent out.
 
 `install` adds the hooks to `~/.claude/settings.json`. Grok also reads that file
 for Claude compatibility, so one install covers both. Use `--agent grok` to

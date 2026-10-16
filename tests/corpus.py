@@ -25,6 +25,13 @@ def j(*parts: str) -> str:
     return "".join(parts)
 
 
+def png_base64(size: int = 400) -> str:
+    """Base64 of bytes that start with a real PNG signature."""
+    import base64
+
+    return base64.b64encode(b"\x89PNG\r\n\x1a\n" + bytes(_rng.randrange(256) for _ in range(size))).decode()
+
+
 STRIPE_LIVE = j("sk", "_live_", rand(99))
 STRIPE_RESTRICTED = j("rk", "_live_", rand(99))
 STRIPE_WEBHOOK = j("wh", "sec_", rand(32))

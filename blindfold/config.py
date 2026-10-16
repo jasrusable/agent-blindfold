@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import secrets as _random
 import time
 from dataclasses import dataclass, field, fields
@@ -19,12 +20,22 @@ _ENV_DIRS = ["~", "~/projects/*", "~/projects/*/*", "~/projects/*/worktrees/*/*"
 DEFAULT_SOURCES = ["~/.config/*/*.env", "~/.config/*/.env"] + [f"{d}/{n}" for d in _ENV_DIRS for n in _ENV_NAMES]
 
 
-# macOS Keychain reads that print the password, and 1Password reads.
+# macOS Keychain reads that print the password, and 1Password reads. Matched in
+# command position only (line start, after ; & | ( { ` or $( , after then/do/
+# else, behind wrappers like sudo/env/command and VAR=value), so text that only
+# mentions them (a commit message, test data) isn't refused. A denylist guards
+# against accidents, not intent: quoting tricks get past any.
+_COMMAND_START = (
+    r"(?:^|[;&|({`]|\$\(|\b(?:then|do|else|elif)\s)\s*"
+    r"(?:(?:sudo|env|command|nohup|time|exec|xargs|builtin|nice)(?:\s+-\S+)*\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+    r"(?:\S*/)?"
+)
+_OP_OPTIONS = r"(?:\s+--?[a-z-]+(?:[ =][^\s-]\S*)?)*"
 DEFAULT_BLOCKED_COMMANDS = [
-    r"\bsecurity\s+(?:find-(?:generic|internet)-password\b[^|;&]*\s-[a-zA-Z]*[wg]|dump-keychain)",
-    r"\bop\s+(?:read|inject)\b",
-    r"\bop\s+item\s+get\b[^|;&]*(?:--reveal|--fields|--format)",
-    r"\bop\s+document\s+get\b",
+    _COMMAND_START + r"security\s+(?:find-(?:generic|internet)-password\b[^|;&\n]*\s-[a-zA-Z]*[wg]|dump-keychain)",
+    _COMMAND_START + r"op" + _OP_OPTIONS + r"\s+(?:read|inject)\b",
+    _COMMAND_START + r"op" + _OP_OPTIONS + r"\s+item\s+get\b[^|;&\n]*(?:--reveal|--fields|--format|--otp)",
+    _COMMAND_START + r"op" + _OP_OPTIONS + r"\s+document\s+get\b",
 ]
 
 
@@ -95,6 +106,11 @@ def load_config() -> Config:
     if unknown:
         raise ValueError(f"Unknown blindfold config keys in {CONFIG_PATH}: {', '.join(unknown)}")
     _check_types(raw)
+    for pattern in raw.get("blocked_commands", []):
+        try:
+            re.compile(pattern)
+        except re.error as error:
+            raise ValueError(f"blocked_commands has an invalid regex {pattern!r}: {error}") from error
     return Config(**raw)
 
 

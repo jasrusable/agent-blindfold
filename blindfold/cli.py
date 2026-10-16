@@ -63,9 +63,11 @@ def cmd_doctor(_args) -> int:
         print(f"  ⚠️  NOT USED: {path}: {problem} (its secrets are not masked by exact match)")
     print(f"known:   {masker.known_count} masked value(s), including encodings (values never shown)")
     print(f"load:    {elapsed:.0f} ms")
-    for agent, path in TARGETS.items():
-        installed = os.path.exists(path) and "blindfold" in _read(path)
-        print(f"{agent:7}: hooks {'installed' if installed else 'not installed'} ({path})")
+    installed = {agent: os.path.exists(path) and "blindfold" in _read(path) for agent, path in TARGETS.items()}
+    print(f"claude : hooks {'installed' if installed['claude'] else 'not installed'} ({TARGETS['claude']})")
+    # Grok also runs the hooks in ~/.claude/settings.json (Claude compatibility).
+    grok = "installed" if installed["grok"] else "via ~/.claude/settings.json" if installed["claude"] else "not installed"
+    print(f"grok   : hooks {grok}")
     return 0
 
 

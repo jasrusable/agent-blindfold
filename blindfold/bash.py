@@ -32,8 +32,11 @@ _REPORT = (
 # Run in a subshell, where they can't stop the parent reporting: nounset in any
 # spelling (zsh skips EXIT traps when it kills the shell), `exec` (replaces the
 # shell, so no EXIT trap runs), and `trap` (could replace or clear ours).
+# Matched conservatively (anywhere): a regex can't parse shell the way the
+# shell does, so when in doubt the subshell is used, at the cost of that call's
+# `cd` persistence. `eval` and `source` can do any of these.
 _NEEDS_SUBSHELL = re.compile(
-    r"\bset\s+-[A-Za-z]*u|nounset|no_?unset|(?:^|[;&|({]|\bthen|\bdo|\belse)\s*exec\b|\btrap\b",
+    r"\bset\s+-[A-Za-z]*u|nounset|no_?unset|\bexec\b|\btrap\b|\beval\b|\bsource\b|(?:^|[;&|(]\s*)\.\s",
     re.IGNORECASE | re.MULTILINE,
 )
 

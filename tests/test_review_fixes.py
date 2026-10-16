@@ -60,9 +60,9 @@ class BashWrapper(unittest.TestCase):
             self.assertEqual(os.path.realpath(proc.stdout.splitlines()[0]), os.path.realpath(directory))
             self.assertIn("hello", proc.stdout)
 
-    def test_docker_exec_and_find_exec_stay_in_the_same_shell(self):
-        self.assertTrue(bash.wrap("docker exec app ls").split("\n")[1] == "{")
-        self.assertTrue(bash.wrap("find . -exec ls {} +").split("\n")[1] == "{")
+    def test_plain_commands_stay_in_the_same_shell(self):
+        for command in ("npm test", "cd sub && ls", "git status"):
+            self.assertEqual(bash.wrap(command).split("\n")[1], "{", command)
 
     def test_idempotent_and_skips_only_comment_only_commands(self):
         once = bash.wrap("ls")
@@ -104,7 +104,7 @@ class Structure(unittest.TestCase):
         self.assertEqual(masked["base64"], "QUJD")
 
     def test_mcp_media_data_is_left_intact(self):
-        block = [{"type": "image", "data": corpus.rand(500, corpus.ALNUM + "+/"), "mimeType": "image/png"}]
+        block = [{"type": "image", "data": corpus.png_base64(500), "mimeType": "image/png"}]
         self.assertEqual(deep_map(block, lambda s: M.mask(s)[0]), block)
 
     def test_withheld_output_replaces_keys_that_are_not_schema_names(self):
@@ -239,22 +239,54 @@ class RoundTwo(unittest.TestCase):
 
 # Assembled at runtime so no file spells out a full secret-dump command.
 KEYCHAIN = "secu" + "rity"
+OP = "o" + "p"
 
 
 class BlockedCommands(unittest.TestCase):
-    def test_bare_secret_dumps_are_refused(self):
-        for command in (f"{KEYCHAIN} find-" "generic-password -s svc -w", f"{KEYCHAIN} find-" "internet-password -gs host",
-                        f"{KEYCHAIN} dump-" "keychain", "op read op://Vault/item/password", "op item get Stripe --reveal",
-                        "op item get Stripe --format json", "op inject -i tpl.env", "op document get cert"):
-            with self.subTest(command=command):
-                out = reply({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}, M)
-                self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+    def deny(self, command):
+        out = reply({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}, M)
+        return (out or {}).get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
 
-    def test_tools_that_consume_secrets_are_fine(self):
-        for command in ("op run --env-file=.env -- npm start", f"{KEYCHAIN} find-" "generic-password -s svc", "op item list"):
+    def test_bare_secret_dumps_are_refused_in_every_command_position(self):
+        read = f"{OP} read op://Vault/item/password"
+        for command in (
+            f"{KEYCHAIN} find-" "generic-password -s svc -w", f"{KEYCHAIN} find-" "internet-password -gs host",
+            f"{KEYCHAIN} dump-" "keychain", read, f"{OP} item get Stripe --reveal", f"{OP} item get Stripe --format json",
+            f"{OP} inject -i tpl.env", f"{OP} document get cert", f"{OP} --account work read op://V/i/f",
+            f"/usr/bin/{KEYCHAIN} find-" "generic-password -w -s svc",
+            f"echo x && {read}", f"echo x; {read}", f"echo x\n{read}", f"TOKEN=$({read})", f"TOKEN=`{read}`",
+            f"{{ {read}; }}", f"if true; then {read}; fi", f"for i in 1; do {read}; done",
+            f"sudo {read}", f"env A=1 {read}", f"command {read}", f"nohup {read}", f"time {read}",
+            f"A=1 B=2 {read}", f"xargs {OP} read < refs",
+        ):
             with self.subTest(command=command):
-                out = reply({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}, M)
-                self.assertNotEqual((out or {}).get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
+                self.assertTrue(self.deny(command))
+
+    def test_text_that_only_mentions_them_is_fine(self):
+        for command in (f"git commit -m 'stop using {OP} read in scripts'", f"grep -r '{OP} read' docs/",
+                        f"{OP} run --env-file=.env -- npm start", f"{KEYCHAIN} find-" "generic-password -s svc", f"{OP} item list"):
+            with self.subTest(command=command):
+                self.assertFalse(self.deny(command))
+
+    def test_an_invalid_user_regex_takes_the_safe_fallback(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "config.json")
+            with open(path, "w") as handle:
+                json.dump({"blocked_commands": ["(unclosed"]}, handle)
+            with mock.patch("blindfold.config.CONFIG_PATH", path), self.assertRaises(ValueError):
+                load_config()
+
+
+class StrictSubshellAndBlobs(unittest.TestCase):
+    def test_eval_source_and_exec_run_in_a_subshell(self):
+        for command in ("eval 'false'", "source ./x.sh", ". ./x.sh", "command exec ls", "docker exec app ls"):
+            self.assertEqual(bash.wrap(command).split("\n")[1], "(", command)
+
+    def test_a_blob_that_starts_binary_but_is_not_an_image_is_masked(self):
+        import base64 as b64
+
+        crafted = b64.b64encode(bytes(range(200)) + f"STRIPE_API_KEY={corpus.STRIPE_LIVE}".encode()).decode()
+        self.assertNotEqual(deep_map({"base64": crafted}, lambda s: M.mask(s)[0])["base64"], crafted)
 
 
 if __name__ == "__main__":

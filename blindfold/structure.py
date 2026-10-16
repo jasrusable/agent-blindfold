@@ -9,32 +9,32 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .mask import Finding, Masker
 
 # Image payloads: masking base64 can only corrupt the image. A string under one
-# of these keys is skipped only if it is base64 that decodes to binary (an
-# image, a PDF). Base64 that decodes to text (an encoded .env) and anything else
-# there (a presigned URL, document text) is masked like any other string.
+# of these keys is skipped only if all of it is valid base64 that decodes to an
+# image or a PDF (checked by its signature). Anything else there, such as an
+# encoded .env, a presigned URL or document text, is masked like any string.
 SKIP_KEYS = frozenset({"base64", "image", "imageData", "data_uri"})
 _BLOB = re.compile(r"^(?:data:[^,\s]{0,100},)?([A-Za-z0-9+/=_\s-]{64,})$")
+
+
+# MCP media blocks carry their payload under `data`.
+_MEDIA_TYPES = frozenset({"image", "audio", "document"})
+# Schema keys look like identifiers; anything else may itself be a value.
+_SCHEMA_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,40}$")
+# PNG, JPEG, GIF, WebP (RIFF), PDF.
+_MEDIA_SIGNATURES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"RIFF", b"%PDF-")
 
 
 def is_binary_blob(value: str) -> bool:
     match = _BLOB.match(value)
     if not match:
         return False
-    sample = re.sub(r"\s", "", match.group(1))[:4096]
-    sample = sample[: len(sample) - len(sample) % 4]
+    encoded = re.sub(r"\s", "", match.group(1)).replace("-", "+").replace("_", "/")
     try:
-        decoded = base64.b64decode(sample.replace("-", "+").replace("_", "/"), validate=True)
+        decoded = base64.b64decode(encoded + "=" * (-len(encoded) % 4), validate=True)
     except (binascii.Error, ValueError):
         return False
-    try:
-        decoded.decode("utf-8")
-    except UnicodeDecodeError:
-        return True
-    return b"\x00" in decoded
-# MCP media blocks carry their payload under `data`.
-_MEDIA_TYPES = frozenset({"image", "audio", "document"})
-# Schema keys look like identifiers; anything else may itself be a value.
-_SCHEMA_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,40}$")
+    return decoded.startswith(_MEDIA_SIGNATURES)
+
 
 # json.loads/dumps recurse; give them room for any realistic payload. The walk
 # below is iterative, so it has no depth limit of its own.

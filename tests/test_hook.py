@@ -78,7 +78,7 @@ class PostToolUseClaude(unittest.TestCase):
         self.assertIsNone(run(event))
 
     def test_image_payload_is_skipped(self):
-        image = {"type": "image", "file": {"base64": corpus.rand(400, corpus.ALNUM + "+/"), "type": "image/png"}}
+        image = {"type": "image", "file": {"base64": corpus.png_base64(), "type": "image/png"}}
         self.assertIsNone(run({"hook_event_name": "PostToolUse", "tool_name": "Read", "tool_response": image}))
 
     def test_claude_failure_raises_the_alarm_instead_of_a_replacement_it_would_ignore(self):
@@ -128,9 +128,17 @@ class FailClosed(unittest.TestCase):
         self.assertNotIn(corpus.STRIPE_LIVE, json.dumps(reply))
         self.assertIn("withheld", json.dumps(reply))
 
-    def test_pre_tool_use_crash_denies(self):
+    def test_pre_tool_use_crash_allows_the_call_and_says_so(self):
+        # The output is still masked (or withheld) afterwards; refusing every
+        # call over a bug would lock the user and every agent out.
         reply = withheld_reply(Event({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}}))
-        self.assertEqual(reply["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertNotIn("permissionDecision", reply["hookSpecificOutput"])
+        self.assertIn("doctor", reply["hookSpecificOutput"]["additionalContext"])
+
+    def test_prompt_check_crash_warns_instead_of_blocking(self):
+        reply = withheld_reply(Event({"hook_event_name": "UserPromptSubmit", "prompt": "hi"}))
+        self.assertNotIn("decision", reply)
+        self.assertIn("unchecked", reply["systemMessage"])
 
     def test_unreadable_input_blocks_with_exit_2(self):
         stdin = io.TextIOWrapper(io.BytesIO(b"\xff not json"))
