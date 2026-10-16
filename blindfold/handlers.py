@@ -12,6 +12,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional
 
 from .bash import wrap
+from .config import DEFAULT_BLOCKED_COMMANDS
 from .events import Event
 from .mask import PLACEHOLDER_RE, Finding
 from .rules import PROMPT_BLOCKING_KINDS
@@ -108,21 +109,22 @@ def known_names_in(rt: Runtime, texts: List[str]) -> List[str]:
     return sorted({f.kind[4:] for f in findings if f.kind.startswith("env:") and not f.weak})
 
 
-def _blocked_command(event: Event, rt: Runtime) -> Optional[str]:
+BLOCKED_COMMAND_REASON = (
+    "blindfold: this command prints a secret on its own (a Keychain or 1Password read), which can't be "
+    "masked because nothing marks it as a secret. Use a tool that consumes the secret itself "
+    "(`op run`, a CLI that loads its own credentials), or ask the user to run it."
+)
+
+
+def _is_blocked_command(event: Event, patterns: List[str]) -> bool:
     command = event.tool_input.get("command") if isinstance(event.tool_input, dict) else None
-    if not isinstance(command, str):
-        return None
-    return next((pattern for pattern in rt.config.blocked_commands if re.search(pattern, command, re.MULTILINE)), None)
+    return isinstance(command, str) and any(re.search(pattern, command, re.MULTILINE) for pattern in patterns)
 
 
 def pre_tool_use(event: Event, rt: Runtime) -> Reply:
     texts = event.tool_input_texts
-    if _blocked_command(event, rt):
-        return _deny(
-            "blindfold: this command prints a secret on its own (a Keychain or 1Password read), which can't be "
-            "masked because nothing marks it as a secret. Use a tool that consumes the secret itself "
-            "(`op run`, a CLI that loads its own credentials), or ask the user to run it."
-        )
+    if _is_blocked_command(event, rt.config.blocked_commands):
+        return _deny(BLOCKED_COMMAND_REASON)
     if rt.config.guard_placeholders and not event.is_read_only_tool and any(PLACEHOLDER_RE.search(t) for t in texts):
         return _deny(
             "blindfold: this call contains a masked-secret placeholder (<blindfold kind= …>). The real value is what "
@@ -219,12 +221,18 @@ def withheld_reply(event: Event) -> Reply:
     # is masking the output afterwards (which still withholds on failure), and
     # refusing everything would lock the user and every agent out over a bug.
     if event.name == "PreToolUse":
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "additionalContext": "blindfold's pre-call check failed, so this call was allowed unchecked. Tell the user to run `blindfold doctor`.",
-            }
-        }
+        # Except for the built-in blocked commands: their output is a bare secret
+        # that masking afterwards can't recognise.
+        if _is_blocked_command(event, DEFAULT_BLOCKED_COMMANDS):
+            return _deny(BLOCKED_COMMAND_REASON)
+        note = "blindfold's pre-call check failed, so this call was allowed unchecked. Tell the user to run `blindfold doctor`."
+        reply: Dict[str, Any] = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": note}}
+        # The guards are skipped, but Claude's Bash wrapper is kept: without it a
+        # failing command's output couldn't be masked.
+        command = event.tool_input.get("command") if isinstance(event.tool_input, dict) else None
+        if not event.is_grok and event.tool == "Bash" and isinstance(command, str):
+            reply["hookSpecificOutput"]["updatedInput"] = {**event.tool_input, "command": wrap(command)}
+        return reply
     if event.name == "UserPromptSubmit":
         return {"systemMessage": "⚠️ blindfold could not check this prompt for secrets (run `blindfold doctor`). It was sent unchecked."}
     return None

@@ -21,16 +21,21 @@ DEFAULT_SOURCES = ["~/.config/*/*.env", "~/.config/*/.env"] + [f"{d}/{n}" for d 
 
 
 # macOS Keychain reads that print the password, and 1Password reads. Matched in
-# command position only (line start, after ; & | ( { ` or $( , after then/do/
-# else, behind wrappers like sudo/env/command and VAR=value), so text that only
-# mentions them (a commit message, test data) isn't refused. A denylist guards
-# against accidents, not intent: quoting tricks get past any.
+# command position only, so text that only mentions them (a commit message,
+# test data) isn't refused: line start; after ; & | ( { ` ! or $( ; after
+# if/then/do/else/while/until; inside `bash -c '…'`, `eval '…'` or an ssh
+# command; behind VAR=value and a wrapper (sudo, env, timeout, …) with up to ten
+# arguments, which covers nested wrappers. Every repeat is bounded and
+# unambiguous, so no command can make the match backtrack for long. A denylist
+# guards against accidents, not intent: quoting tricks get past any.
+_WRAPPER = r"(?:sudo|doas|env|command|nohup|time|timeout|exec|xargs|builtin|nice|caffeinate|stdbuf|unbuffer|watch)"
 _COMMAND_START = (
-    r"(?:^|[;&|({`]|\$\(|\b(?:then|do|else|elif)\s)\s*"
-    r"(?:(?:sudo|env|command|nohup|time|exec|xargs|builtin|nice)(?:\s+-\S+)*\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+    r"(?:^|[;&|({`!]|\$\(|\b(?:if|then|do|else|elif|while|until)\s"
+    r"|\b(?:ba|z|da|k)?sh(?:\s+-\S+){1,6}\s+[\"']?|\beval\s+[\"']?|\bssh\s+(?:\S+\s+){0,12}?[\"']?)\s*"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+){0,8}(?:" + _WRAPPER + r"\s+(?:\S+\s+){0,10}?)?"
     r"(?:\S*/)?"
 )
-_OP_OPTIONS = r"(?:\s+--?[a-z-]+(?:[ =][^\s-]\S*)?)*"
+_OP_OPTIONS = r"(?:\s+--?[a-z][a-z-]*(?:[ =][^\s-]\S*)?){0,8}"
 DEFAULT_BLOCKED_COMMANDS = [
     _COMMAND_START + r"security\s+(?:find-(?:generic|internet)-password\b[^|;&\n]*\s-[a-zA-Z]*[wg]|dump-keychain)",
     _COMMAND_START + r"op" + _OP_OPTIONS + r"\s+(?:read|inject)\b",

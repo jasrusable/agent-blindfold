@@ -6,8 +6,10 @@ into the fail-closed reply (output withheld, call or prompt blocked), and input
 that can't be parsed exits 2, which blocks a pending call or prompt.
 """
 
+import contextlib
 import json
 import os
+import select
 import signal
 import sys
 import time
@@ -50,6 +52,47 @@ def respond(raw: Dict[str, Any], rt: Optional[Runtime] = None) -> Optional[Dict[
             signal.alarm(0)
 
 
+def respond_with_deadline(raw: Dict[str, Any], seconds: float = BUDGET_SECONDS + 2) -> Optional[Dict[str, Any]]:
+    """respond() in a forked child, killed at the deadline. SIGALRM only fires
+    between bytecodes, so one slow regex call could otherwise run past the
+    agent's hook timeout, which fails open."""
+    if not hasattr(os, "fork"):
+        return respond(raw)
+    reader, writer = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(reader)
+        try:
+            payload = json.dumps(respond(raw), ensure_ascii=True).encode("ascii")
+            with os.fdopen(writer, "wb") as out:
+                out.write(payload)
+        finally:
+            os._exit(0)
+    os.close(writer)
+    chunks, deadline = [], time.monotonic() + seconds
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([reader], [], [], remaining)[0]:
+                raise TimeoutError()
+            chunk = os.read(reader, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return json.loads(b"".join(chunks))
+    except Exception:  # noqa: BLE001 - incl. the deadline and a child that died
+        print("blindfold: masking ran past its deadline or crashed", file=sys.stderr)
+        try:
+            return withheld_reply(Event(raw))
+        except Exception:  # noqa: BLE001
+            return None
+    finally:
+        os.close(reader)
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+
+
 def main() -> int:
     started = time.monotonic()
     try:
@@ -61,7 +104,7 @@ def main() -> int:
         # prompt in both agents, the fail-closed direction where one exists.
         print("blindfold: could not read the hook input, so this step was blocked", file=sys.stderr)
         return 2
-    reply = respond(raw)
+    reply = respond_with_deadline(raw)
     if reply is not None:
         try:
             # ASCII-only JSON can't fail to encode, whatever the output held.

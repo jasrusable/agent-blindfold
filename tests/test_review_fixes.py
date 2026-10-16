@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -257,7 +258,10 @@ class BlockedCommands(unittest.TestCase):
             f"echo x && {read}", f"echo x; {read}", f"echo x\n{read}", f"TOKEN=$({read})", f"TOKEN=`{read}`",
             f"{{ {read}; }}", f"if true; then {read}; fi", f"for i in 1; do {read}; done",
             f"sudo {read}", f"env A=1 {read}", f"command {read}", f"nohup {read}", f"time {read}",
-            f"A=1 B=2 {read}", f"xargs {OP} read < refs",
+            f"A=1 B=2 {read}", f"xargs {OP} read < refs", f"bash -c '{read}'", f'sh -c "{read}"', f"eval '{read}'",
+            f"bash -lc '{read}'", f"zsh -euc \"{read}\"", f"if {read}; then :; fi", f"while {read}; do :; done",
+            f"! {read}", f"timeout 5 {read}", f"sudo -u root {read}", f"nice -n 5 {read}", f"ssh -p 22 host {read}",
+            f"ssh host '{read}'", f"eval {read}",
         ):
             with self.subTest(command=command):
                 self.assertTrue(self.deny(command))
@@ -268,6 +272,20 @@ class BlockedCommands(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertFalse(self.deny(command))
 
+    def test_adversarial_commands_cannot_make_the_match_backtrack_for_long(self):
+        for command in ("sudo -a " * 3000, "bash " + "-x " * 3000, "ssh " + "a " * 3000, "A=1 " * 3000,
+                        "sudo -u " * 3000 + OP, "env " * 3000 + OP + " list", "timeout 5 " * 3000, OP + " --a" * 3000, OP + " --a-b x" * 3000, KEYCHAIN + " find-" "generic-password " + "-s " * 3000):
+            started = time.monotonic()
+            self.deny(command)
+            self.assertLess(time.monotonic() - started, 1.0, command[:20])
+
+    def test_the_failure_path_still_refuses_them(self):
+        from blindfold.events import Event
+        from blindfold.handlers import withheld_reply
+
+        out = withheld_reply(Event({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": f"{OP} read op://V/i/f"}}))
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
     def test_an_invalid_user_regex_takes_the_safe_fallback(self):
         with tempfile.TemporaryDirectory() as home:
             path = os.path.join(home, "config.json")
@@ -275,6 +293,89 @@ class BlockedCommands(unittest.TestCase):
                 json.dump({"blocked_commands": ["(unclosed"]}, handle)
             with mock.patch("blindfold.config.CONFIG_PATH", path), self.assertRaises(ValueError):
                 load_config()
+
+
+class ThirdReview(unittest.TestCase):
+    def test_pre_check_failure_still_wraps_claude_bash(self):
+        from blindfold.events import Event
+        from blindfold.handlers import withheld_reply
+
+        out = withheld_reply(Event({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "cat .env; exit 1"}}))
+        self.assertIn(bash.MARKER, out["hookSpecificOutput"]["updatedInput"]["command"])
+        grok = withheld_reply(Event({"hookEventName": "pre_tool_use", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}}))
+        self.assertNotIn("updatedInput", grok["hookSpecificOutput"])
+
+    def test_an_image_with_a_secret_in_its_text_is_masked_whole(self):
+        import base64 as b64
+        from blindfold.structure import mask_value
+
+        clean = corpus.png_base64(300)
+        tainted = b64.b64encode(b"\x89PNG\r\n\x1a\n" + bytes(64) + f"tEXtComment STRIPE_API_KEY={corpus.STRIPE_LIVE}".encode()).decode()
+        out, findings = mask_value(M, {"type": "image", "file": {"base64": tainted}})
+        self.assertNotIn(tainted, json.dumps(out))
+        self.assertTrue(findings)
+        self.assertEqual(mask_value(M, {"type": "image", "file": {"base64": clean}}), ({"type": "image", "file": {"base64": clean}}, []))
+
+
+class FourthReview(unittest.TestCase):
+    def test_a_masker_that_overruns_its_deadline_is_killed_and_the_output_withheld(self):
+        event = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_response": {"stdout": "x", "stderr": ""}}
+        started = time.monotonic()
+        with mock.patch.object(hook, "respond", side_effect=lambda _raw: time.sleep(30)):
+            out = hook.respond_with_deadline(event, seconds=1)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertIn("withheld", out["hookSpecificOutput"]["updatedToolOutput"]["stdout"])
+
+    def test_the_deadline_wrapper_passes_replies_through(self):
+        event = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_response": {"stdout": "é" * 200000, "stderr": ""}}
+        self.assertEqual(hook.respond_with_deadline(event), hook.respond(event))
+
+    def test_a_broken_install_withholds_output_instead_of_failing_open(self):
+        launcher = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "blindfold")
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "bin"))
+            os.makedirs(os.path.join(root, "blindfold"))
+            with open(os.path.join(root, "blindfold", "__init__.py"), "w") as handle:
+                handle.write("raise NameError('broken')\n")
+            with open(launcher) as src, open(os.path.join(root, "bin", "blindfold"), "w") as dst:
+                dst.write(src.read())
+            for event, check in (
+                ({"hook_event_name": "PostToolUse", "tool_name": "Read", "tool_response": {"type": "text", "file": {"content": corpus.STRIPE_LIVE}}},
+                 lambda out: corpus.STRIPE_LIVE not in json.dumps(out) and "file" in out["hookSpecificOutput"]["updatedToolOutput"]),
+                ({"hookEventName": "post_tool_use", "hook_event_name": "PostToolUse", "toolName": "read_file", "toolResult": corpus.STRIPE_LIVE},
+                 lambda out: corpus.STRIPE_LIVE not in json.dumps(out)),
+                ({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}}, lambda out: out is None),
+            ):
+                done = subprocess.run([sys.executable, os.path.join(root, "bin", "blindfold"), "hook"], input=json.dumps(event),
+                                      capture_output=True, text=True, timeout=30)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertTrue(check(json.loads(done.stdout) if done.stdout else None), done.stdout)
+
+    def test_deflated_pdf_and_png_text_is_scanned(self):
+        import base64 as b64
+        import zlib
+        from blindfold.structure import mask_value
+
+        secret = f"STRIPE_API_KEY={corpus.STRIPE_LIVE}".encode()
+        pdf = b"%PDF-1.4\n1 0 obj<</Filter/FlateDecode>>stream\n" + zlib.compress(b"BT (" + secret + b") Tj ET") + b"\nendstream\nendobj\n"
+        ztxt = b"Comment\x00\x00" + zlib.compress(secret)
+        png = b"\x89PNG\r\n\x1a\n" + len(ztxt).to_bytes(4, "big") + b"zTXt" + ztxt + bytes(4) + bytes(64)
+        for blob in (pdf, png):
+            encoded = b64.b64encode(blob).decode()
+            out, findings = mask_value(M, {"type": "image", "file": {"base64": encoded}})
+            self.assertNotIn(encoded, json.dumps(out))
+            self.assertTrue(findings)
+
+    def test_a_zip_bomb_is_inflated_only_up_to_the_cap(self):
+        import base64 as b64
+        import zlib
+        from blindfold.structure import MAX_INFLATED, decoded_text
+
+        pdf = b"%PDF-1.4\nstream\n" + zlib.compress(b"A" * (64 << 20), 9) + b"\nendstream\n"
+        started = time.monotonic()
+        text = decoded_text(b64.b64encode(pdf).decode())
+        self.assertLessEqual(len(text), MAX_INFLATED + len(pdf))
+        self.assertLess(time.monotonic() - started, 5)
 
 
 class StrictSubshellAndBlobs(unittest.TestCase):

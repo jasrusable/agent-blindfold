@@ -4,6 +4,7 @@ import base64
 import binascii
 import re
 import sys
+import zlib
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .mask import Finding, Masker
@@ -41,7 +42,55 @@ def is_binary_blob(value: str) -> bool:
 sys.setrecursionlimit(max(sys.getrecursionlimit(), 20000))
 
 
-def deep_map(value: Any, fn: Callable[[str], str], map_keys: bool = True) -> Any:
+# Inflated text scanned per blob, so a zip bomb can't stall the hook.
+MAX_INFLATED = 4 << 20
+_PDF_STREAM = re.compile(rb"stream\r?\n(.*?)\r?\nendstream", re.DOTALL)
+
+
+def _png_text_chunks(data: bytes) -> List[bytes]:
+    """tEXt/zTXt/iTXt chunk bodies; pixel data (IDAT) is skipped as noise."""
+    chunks, at = [], 8
+    while at + 8 <= len(data):
+        length, kind = int.from_bytes(data[at : at + 4], "big"), data[at + 4 : at + 8]
+        if kind in (b"tEXt", b"zTXt", b"iTXt"):
+            chunks.append(data[at + 8 : at + 8 + length])
+        at += 12 + length
+    return chunks
+
+
+def _inflated(data: bytes) -> List[bytes]:
+    """Every zlib stream in a PDF's streams or a PNG's text chunks, inflated
+    up to MAX_INFLATED in all."""
+    parts = _PDF_STREAM.findall(data) if data.startswith(b"%PDF-") else _png_text_chunks(data) if data.startswith(b"\x89PNG") else []
+    out, budget = [], MAX_INFLATED
+    for part in parts:
+        start = next((i for i in range(min(len(part), 200)) if part[i] == 0x78 and part[i : i + 2] in (b"x\x01", b"x^", b"x\x9c", b"x\xda")), None)
+        if start is None or budget <= 0:
+            continue
+        try:
+            text = zlib.decompressobj().decompress(part[start:], budget)
+        except zlib.error:
+            continue
+        out.append(text)
+        budget -= len(text)
+    return out
+
+
+def decoded_text(value: str) -> str:
+    """The readable text inside a base64 image or PDF (raw and deflated PDF
+    streams, PNG text chunks, JPEG comments, appended data), for scanning
+    before the blob is skipped. Text drawn as pixels can't be read."""
+    match = _BLOB.match(value)
+    encoded = re.sub(r"\s", "", match.group(1)) if match else ""
+    try:
+        decoded = base64.b64decode(encoded.replace("-", "+").replace("_", "/") + "=" * (-len(encoded) % 4))
+    except (binascii.Error, ValueError):
+        return ""
+    runs = [run for data in [decoded, *_inflated(decoded)] for run in re.findall(rb"[\x20-\x7e]{8,}", data)]
+    return "\n".join(run.decode("ascii") for run in runs)
+
+
+def deep_map(value: Any, fn: Callable[[str], str], map_keys: bool = True, blob_fn: Optional[Callable[[str], str]] = None) -> Any:
     """Apply fn to every string leaf, keeping the structure and every non-string value.
 
     Keys go through fn too when map_keys is set: structured MCP results can be
@@ -55,7 +104,7 @@ def deep_map(value: Any, fn: Callable[[str], str], map_keys: bool = True) -> Any
     while stack:
         source, target, slot, key, in_media = stack.pop()
         if isinstance(source, str) and (key in SKIP_KEYS or (in_media and key == "data")) and is_binary_blob(source):
-            target[slot] = source
+            target[slot] = blob_fn(source) if blob_fn else source
         elif isinstance(source, str):
             target[slot] = fn(source)
         elif isinstance(source, list):
@@ -90,7 +139,16 @@ def mask_value(masker: Masker, value: Any) -> Tuple[Any, List[Finding]]:
         findings.extend(found)
         return masked
 
-    return deep_map(value, mask_string), findings
+    def check_blob(blob: str) -> str:
+        """An image or PDF is left intact unless its readable text hides a secret;
+        then the whole blob is masked (it can't be edited in place)."""
+        _, found = masker.mask(decoded_text(blob))
+        if not found:
+            return blob
+        findings.extend(found)
+        return masker.placeholder("binary-with-secret", blob)
+
+    return deep_map(value, mask_string, blob_fn=check_blob), findings
 
 
 def withhold(value: Any, text: str) -> Any:
