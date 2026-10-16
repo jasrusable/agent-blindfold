@@ -87,39 +87,45 @@ def is_secret_value(name: str, value: str, min_length: int) -> bool:
     return len(value) >= 20 and shannon_entropy(value) >= 3.8 and not re.search(r"[\s/]", value)
 
 
+_PEM_BOUNDARY = re.compile(r"-----(?:BEGIN|END)[A-Z0-9 ]*-----")
+
+
 def _env_entries(text: str) -> List[Tuple[str, str]]:
-    """(name, raw value) pairs; a quoted value may span lines (a PEM key)."""
-    entries, lines, at = [], text.splitlines(), 0
-    while at < len(lines):
-        line, at = lines[at], at + 1
+    """(name, raw value) pairs. Every line is read on its own (an unpaired
+    opening quote is dropped), and a quoted value that closes on a later line
+    (a PEM key) is added as well, never instead: a stray quote can't hide the
+    lines after it."""
+    entries, lines = [], text.splitlines()
+    for at, line in enumerate(lines):
         match = None if line.lstrip().startswith("#") else ENV_LINE.match(line)
         if not match:
             continue
-        raw = match.group(2).strip()
+        name, raw = match.group(1), match.group(2).strip()
         quote = raw[:1]
-        if quote in ("'", '"') and quote not in raw[1:]:
-            rest = []
-            while at < len(lines) and quote not in lines[at]:
-                rest.append(lines[at])
-                at += 1
-            if at < len(lines):
-                rest.append(lines[at][: lines[at].index(quote) + 1])
-                at += 1
-            raw = "\n".join([raw, *rest])
-        entries.append((match.group(1), raw))
+        if quote not in ("'", '"') or quote in raw[1:]:
+            entries.append((name, raw))
+            continue
+        entries.append((name, raw[1:]))
+        closing = next((end for end in range(at + 1, len(lines)) if quote in lines[end]), None)
+        if closing is not None:
+            tail = lines[closing][: lines[closing].index(quote) + 1]
+            entries.append((name, "\n".join([raw, *lines[at + 1 : closing], tail])))
     return entries
 
 
 def _key_lines(value: str) -> List[str]:
-    """The body lines of a multi-line value, which output often shows one at a
-    time. PEM BEGIN/END lines are public boilerplate, never secrets."""
-    return [line.strip() for line in value.splitlines() if line.strip() and not line.lstrip().startswith("-----")] if "\n" in value else []
+    """The lines of a multi-line value (real or \\n-escaped), which output
+    often shows one at a time. PEM BEGIN/END lines are public, never secrets."""
+    lines = value.replace("\\n", "\n").splitlines()
+    return [line.strip() for line in lines if line.strip() and not _PEM_BOUNDARY.fullmatch(line.strip())] if len(lines) > 1 else []
 
 
 def parse_env_text(text: str, min_length: int) -> List[KnownSecret]:
     found = []
     for name, raw in _env_entries(text):
         value = _unquote(raw)
+        if _PEM_BOUNDARY.fullmatch(value):
+            continue
         for line in _key_lines(value):
             if is_secret_value(name, line, min_length):
                 found.append(KnownSecret(line, name, is_weak(line)))

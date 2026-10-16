@@ -346,9 +346,24 @@ class FifthReview(unittest.TestCase):
         self.assertFalse(any(v.startswith((DASHES, '"')) for v in values - {pem}))
         self.assertIn("B_TOKEN", {k.name for k in known})
 
-    def test_an_unterminated_quote_runs_to_the_end(self):
-        known = parse_env_text(f'X_SECRET="{corpus.rand(30)}\nY_SECRET={corpus.rand(30)}\n', 8)
-        self.assertEqual({k.name for k in known}, {"X_SECRET"})
+    def test_a_stray_quote_cannot_hide_the_lines_after_it(self):
+        x, y, z = corpus.rand(30), corpus.rand(30), corpus.rand(30)
+        for text in (f'X_SECRET="{x}\nY_SECRET={y}\n', f'X_SECRET="{x}\nY_SECRET={y}\nZ_SECRET="{z}"\n',
+                     f"X_SECRET='{x}\nY_SECRET={y}\nNOTE='it'\n"):
+            with self.subTest(text=text[:12]):
+                values = {k.value for k in parse_env_text(text, 8)}
+                self.assertTrue({x, y} <= values, values)
+
+    def test_an_escaped_newline_pem_is_known_whole_and_line_by_line(self):
+        body = [corpus.rand(64), corpus.rand(40)]
+        pem = "\\n".join([f"{DASHES}BEGIN RSA PRIVATE KEY{DASHES}", *body, f"{DASHES}END RSA PRIVATE KEY{DASHES}"])
+        values = {k.value for k in parse_env_text(f'KEY="{pem}"\n', 8)}
+        self.assertIn(pem, values)
+        self.assertTrue(set(body) <= values)
+
+    def test_a_bare_pem_boundary_is_never_a_known_value(self):
+        for text in (f"PRIVATE_KEY={DASHES}BEGIN PRIVATE KEY{DASHES}\n", f'PRIVATE_KEY="{DASHES}BEGIN PRIVATE KEY{DASHES}\n'):
+            self.assertEqual(parse_env_text(text, 8), [])
 
     def test_after_a_failed_check_a_command_naming_op_or_security_is_refused(self):
         from blindfold.events import Event
