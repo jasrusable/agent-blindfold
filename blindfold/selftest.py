@@ -6,6 +6,12 @@ only if the agent never shows the canary, did see blindfold's placeholder (so th
 hook ran, rather than the model refusing), and, for Claude, the transcript on
 disk holds no canary either. Run it after installing and after agent upgrades:
 it is the check that catches a hook format change silently disabling masking.
+
+By default the agent runs this checkout's hooks, wired in for the run. With
+installed=True it gets no hooks of its own, so only what its real config runs
+(the install) can mask anything; that config can't list the canary's file, so
+the canary is a GitHub-token-shaped value, which the rules mask under any
+config.
 """
 
 import glob
@@ -13,6 +19,7 @@ import json
 import os
 import secrets
 import shutil
+import string
 import subprocess
 import tempfile
 from typing import List, Optional, Tuple
@@ -30,12 +37,18 @@ PROMPT = (
 )
 
 
-def _workspace() -> Tuple[str, str, str]:
+def _canary(installed: bool) -> str:
+    if installed:
+        return "gh" + "p_" + "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36))
+    return "Cv" + secrets.token_urlsafe(30).replace("-", "x").replace("_", "y")
+
+
+def _workspace(installed: bool) -> Tuple[str, str, str]:
     """A git repo outside /tmp (Grok skips project hooks there) with a planted canary."""
     root = os.path.expanduser("~/.cache/blindfold")
     os.makedirs(root, exist_ok=True)
     work = tempfile.mkdtemp(prefix="selftest-", dir=root)
-    canary = "Cv" + secrets.token_urlsafe(30).replace("-", "x").replace("_", "y")
+    canary = _canary(installed)
     with open(os.path.join(work, ".env"), "w") as handle:
         handle.write(f"CANARY_TOKEN={canary}\nAPP_ENV=selftest\n")
     home = os.path.join(work, ".blindfold-home")
@@ -69,12 +82,13 @@ def _run(argv: List[str], cwd: str) -> Tuple[int, str]:
     return proc.returncode, proc.stdout + proc.stderr
 
 
-def _claude(work: str, home: str) -> Tuple[int, str, Optional[str]]:
+def _claude(work: str, home: str, installed: bool) -> Tuple[int, str, Optional[str]]:
     settings = os.path.join(home, "claude-settings.json")
     # A real allow-list rather than blanket Bash permission, so the run also
     # proves the wrapped commands still match the user's rules.
+    permissions = {"permissions": {"allow": ["Read", "Bash(cat:*)", "Bash(set:*)"], "deny": ["Bash(rm:*)"]}}
     with open(settings, "w") as handle:
-        json.dump({**_hooks(home), "permissions": {"allow": ["Read", "Bash(cat:*)", "Bash(set:*)"], "deny": ["Bash(rm:*)"]}}, handle)
+        json.dump(permissions if installed else {**_hooks(home), **permissions}, handle)
     code, out = _run(["claude", "-p", PROMPT, "--settings", settings, "--output-format", "json"], work)
     transcript = None
     try:
@@ -86,11 +100,12 @@ def _claude(work: str, home: str) -> Tuple[int, str, Optional[str]]:
     return code, out, transcript
 
 
-def _grok(work: str, home: str) -> Tuple[int, str, Optional[str]]:
-    hooks_dir = os.path.join(work, ".grok", "hooks")
-    os.makedirs(hooks_dir)
-    with open(os.path.join(hooks_dir, "blindfold.json"), "w") as handle:
-        json.dump(_hooks(home), handle)
+def _grok(work: str, home: str, installed: bool) -> Tuple[int, str, Optional[str]]:
+    if not installed:
+        hooks_dir = os.path.join(work, ".grok", "hooks")
+        os.makedirs(hooks_dir)
+        with open(os.path.join(hooks_dir, "blindfold.json"), "w") as handle:
+            json.dump(_hooks(home), handle)
     code, out = _run(["grok", "-p", PROMPT, "--cwd", work, "--trust", "--yolo", "--max-turns", "8"], work)
     return code, out, None
 
@@ -98,17 +113,26 @@ def _grok(work: str, home: str) -> Tuple[int, str, Optional[str]]:
 AGENTS = {"claude": _claude, "grok": _grok}
 
 
-def run_agent(name: str) -> bool:
-    work, home, canary = _workspace()
+def run_agent(name: str, installed: bool = False) -> bool:
+    label = f"{name} (installed)" if installed else name
+    if installed:
+        from .cli import installed_hooks
+
+        command = installed_hooks()[name]
+        if not command:
+            print(f"{label}: FAIL\n  blindfold's hooks are not in {name}'s config; run `blindfold install --apply`")
+            return False
+        print(f"{label}: hooks run {command}")
+    work, home, canary = _workspace(installed)
     try:
-        code, out, transcript = AGENTS[name](work, home)
+        code, out, transcript = AGENTS[name](work, home, installed)
         saw_placeholder = out.count("<blindfold kind=") >= 4
         leaked = canary in out
         transcript_leak = bool(transcript) and canary in _read(transcript)
         # Claude: the user's deny rule must still apply to the wrapped command.
         deny_held = name != "claude" or os.path.exists(os.path.join(work, "keep.txt"))
         ok = code == 0 and saw_placeholder and not leaked and not transcript_leak and deny_held
-        print(f"{name}: {'PASS' if ok else 'FAIL'}")
+        print(f"{label}: {'PASS' if ok else 'FAIL'}")
         print(f"  exit code {code}; placeholder seen: {saw_placeholder}; canary in reply: {leaked}")
         if name == "claude":
             print(f"  transcript: {transcript or 'not found'}; canary in transcript: {transcript_leak}; deny rule held: {deny_held}")
@@ -119,7 +143,7 @@ def run_agent(name: str) -> bool:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def run(agents: Optional[List[str]] = None) -> int:
+def run(agents: Optional[List[str]] = None, installed: bool = False) -> int:
     """In-process checks always; real agents when named."""
     from .runtime import build_runtime
     from .config import Config
@@ -129,5 +153,5 @@ def run(agents: Optional[List[str]] = None) -> int:
     masked, findings = rt.masker.mask(f"STRIPE_SECRET_KEY={fake}")
     unit_ok = fake not in masked and bool(findings)
     print(f"engine: {'PASS' if unit_ok else 'FAIL'}")
-    results = [unit_ok] + [run_agent(name) for name in (agents or [])]
+    results = [unit_ok] + [run_agent(name, installed) for name in (agents or [])]
     return 0 if all(results) else 1

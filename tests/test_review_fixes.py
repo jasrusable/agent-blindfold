@@ -1,5 +1,7 @@
 """Fixes from the 2026-10-16 adversarial review, each pinned by a test."""
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -319,6 +321,41 @@ class ThirdReview(unittest.TestCase):
 
 
 DASHES = "-" * 5
+
+
+class InstalledSelftest(unittest.TestCase):
+    def test_the_installed_canary_is_masked_by_the_default_rules_alone(self):
+        from blindfold.config import Config
+        from blindfold.runtime import build_runtime
+        from blindfold.selftest import _canary
+
+        rt = build_runtime(Config(use_default_known_secret_files=False), environ={})
+        canary = _canary(installed=True)
+        masked, findings = rt.masker.mask(f"CANARY_TOKEN={canary}\n")
+        self.assertNotIn(canary, masked)
+        self.assertTrue(findings)
+
+    def test_installed_hooks_finds_the_command_in_either_config(self):
+        from blindfold import cli
+
+        with tempfile.TemporaryDirectory() as root:
+            claude, grok = os.path.join(root, "settings.json"), os.path.join(root, "blindfold.json")
+            hook = {"hooks": [{"type": "command", "command": "/opt/x/bin/blindfold hook", "timeout": 30}]}
+            with open(claude, "w") as handle:
+                json.dump({"hooks": {"PostToolUse": [{"matcher": ".*", **hook}]}}, handle)
+            with mock.patch.dict(cli.TARGETS, {"claude": claude, "grok": grok}):
+                self.assertEqual(cli.installed_hooks(), {"claude": "/opt/x/bin/blindfold", "grok": "/opt/x/bin/blindfold"})
+                os.remove(claude)
+                self.assertEqual(cli.installed_hooks(), {"claude": None, "grok": None})
+
+    def test_installed_mode_fails_fast_when_nothing_is_installed(self):
+        from blindfold import cli, selftest
+
+        with mock.patch.object(cli, "installed_hooks", return_value={"claude": None, "grok": None}), \
+             mock.patch.object(selftest, "_workspace", side_effect=AssertionError("must not start an agent")), \
+             contextlib.redirect_stdout(io.StringIO()) as printed:
+            self.assertFalse(selftest.run_agent("grok", installed=True))
+        self.assertIn("grok (installed): FAIL", printed.getvalue())
 
 
 class FifthReview(unittest.TestCase):

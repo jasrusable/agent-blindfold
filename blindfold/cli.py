@@ -4,10 +4,11 @@ import argparse
 import difflib
 import json
 import os
+import re
 import shutil
 import sys
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from . import __version__
 from .config import CONFIG_PATH, KEY_PATH
@@ -46,6 +47,17 @@ def cmd_scan(args) -> int:
     return 0
 
 
+def installed_hooks() -> Dict[str, Optional[str]]:
+    """Per agent, the blindfold command its real config runs, or None. Grok also
+    runs the hooks in ~/.claude/settings.json (Claude compatibility)."""
+    found = {}
+    for agent, path in TARGETS.items():
+        match = re.search(r"([^\s\"']*blindfold)(?: [^\s\"']+){0,4} hook", _read(path)) if os.path.exists(path) else None
+        found[agent] = match.group(1) if match else None
+    found["grok"] = found["grok"] or found["claude"]
+    return found
+
+
 def cmd_doctor(_args) -> int:
     started = time.monotonic()
     rt = load_runtime()
@@ -63,10 +75,10 @@ def cmd_doctor(_args) -> int:
         print(f"  ⚠️  NOT USED: {path}: {problem} (its secrets are not masked by exact match)")
     print(f"known:   {masker.known_count} masked value(s), including encodings (values never shown)")
     print(f"load:    {elapsed:.0f} ms")
-    installed = {agent: os.path.exists(path) and "blindfold" in _read(path) for agent, path in TARGETS.items()}
+    installed = installed_hooks()
     print(f"claude : hooks {'installed' if installed['claude'] else 'not installed'} ({TARGETS['claude']})")
-    # Grok also runs the hooks in ~/.claude/settings.json (Claude compatibility).
-    grok = "installed" if installed["grok"] else "via ~/.claude/settings.json" if installed["claude"] else "not installed"
+    own_grok = os.path.exists(TARGETS["grok"]) and "blindfold" in _read(TARGETS["grok"])
+    grok = "installed" if own_grok else "via ~/.claude/settings.json" if installed["grok"] else "not installed"
     print(f"grok   : hooks {grok}")
     return 0
 
@@ -125,7 +137,7 @@ def cmd_install(args) -> int:
 def cmd_selftest(args) -> int:
     from .selftest import run
 
-    return run(agents=args.agents)
+    return run(agents=args.agents, installed=args.installed)
 
 
 def main(argv=None) -> int:
@@ -141,6 +153,9 @@ def main(argv=None) -> int:
     install.add_argument("--apply", action="store_true")
     selftest = sub.add_parser("selftest", help="canary tests; --agent runs them through a real agent")
     selftest.add_argument("--agent", dest="agents", action="append", choices=sorted(TARGETS))
+    selftest.add_argument(
+        "--installed", action="store_true", help="test the hooks the agents' own config runs, not this checkout's"
+    )
     args = parser.parse_args(argv)
     commands = {"hook": lambda _a: hook_main(), "scan": cmd_scan, "doctor": cmd_doctor, "install": cmd_install, "selftest": cmd_selftest}
     if args.command is None:

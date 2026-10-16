@@ -24,7 +24,8 @@ blindfold masks secrets in AI agents' tool output. It is security code that must
   - Every false positive or negative found in the wild becomes a corpus case in `tests/corpus.py`.
   - Build fake secrets from fragments (`j("sk", "_live_", …)`), never as literals.
   - Run `python3 -m unittest discover -s tests -t .` (also under Python 3.9).
-  - After touching hook I/O, run `bin/blindfold selftest --agent claude --agent grok`.
+  - After touching hook I/O, run `bin/blindfold selftest --agent claude --agent grok` (tests this checkout).
+  - After updating the installed clone, run it with `--installed` (tests what the agents' real config runs).
 - **Calibrate on real code:** `scripts/fp_eval.py <repos>` prints only masked lines.
 - **Never point the installed hook at a working copy:** it runs on every tool call of every session on the machine. Develop here, test, then `git -C ~/.local/share/agent-blindfold pull`.
 - **Fail safe before a call, closed after it:** a PreToolUse/UserPromptSubmit failure lets the call or prompt through with a warning (still refusing commands that name the 1Password or Keychain CLI); a PostToolUse failure withholds the output.

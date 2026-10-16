@@ -25,7 +25,7 @@ Python 3.9+, no dependencies.
 git clone https://github.com/jasrusable/agent-blindfold ~/.local/share/agent-blindfold
 ~/.local/share/agent-blindfold/bin/blindfold install          # dry run: shows the change
 ~/.local/share/agent-blindfold/bin/blindfold install --apply  # adds the hooks and the skill
-~/.local/share/agent-blindfold/bin/blindfold selftest --agent claude --agent grok
+~/.local/share/agent-blindfold/bin/blindfold selftest --installed --agent claude --agent grok
 ```
 
 One install covers both agents (Grok reads Claude Code's hooks). Install from a
@@ -69,7 +69,7 @@ that, keep secrets off disk (for example `op run` with `op://` references).
 |---------|------|
 | `blindfold doctor` | Shows config, the secret files found and install state. Never prints values. |
 | `blindfold scan [file]` | Masks a file or stdin. |
-| `blindfold selftest` | Canary tests, optionally through a real agent. |
+| `blindfold selftest` | Canary tests, optionally through a real agent. `--installed` tests the hooks your agents actually run; without it, this checkout's. |
 
 ## Configuration
 
