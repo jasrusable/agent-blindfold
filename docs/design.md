@@ -62,6 +62,25 @@ no error. Grok accepts its own result edited in place. Editing every string in
 place is the one form both honour. blindfold's selftest checks this against the real
 agents, because it's exactly what an agent upgrade could break.
 
+### Guarding itself
+
+Before each call, blindfold refuses one that would change blindfold itself:
+
+- **File writes and edits** into the installed copy it runs from, `~/.config/blindfold`
+  (config and key), or the skill links.
+- **Settings edits** that touch blindfold's entries in `~/.claude/settings.json` or
+  `settings.local.json`, or a full write that drops them. Other settings edits
+  are fine.
+- **Turning hooks off:** `disableAllHooks` written anywhere, by any tool.
+- **Shell commands** that name one of those paths, or the agent settings file,
+  or run from inside one, unless every part is read-only (`ls`, `cat`, `grep`,
+  `git log`, `blindfold doctor`, and the like, with no output redirection).
+
+Changes to blindfold go through the user, who can type `! <command>`. Your
+development checkout is not protected; only the copy the hook runs from is.
+Like the command denylist, this stops accidents, not an agent set on getting
+round it (a path it builds at runtime isn't seen).
+
 ## Configuration reference
 
 `~/.config/blindfold/config.json`, all optional:

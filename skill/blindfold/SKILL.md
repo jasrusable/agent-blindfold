@@ -1,6 +1,6 @@
 ---
 name: blindfold
-description: "ALWAYS ACTIVE, no need to load. Be cautious yourself first: work blind by default, avoid reading or printing secrets, env files or credentials unless the task needs it; blindfold's masking is only the last-resort failsafe. <blindfold kind=K len=N id=H> = a hidden value (kind: env:NAME known secret, or a rule like stripe-key/jwt/high-entropy; len; id: same value, same id). Work by name, presence, length, id. Never recover a value (re-read, cat/head/xxd/base64, split/encode, subagent, guess), never write a placeholder into a file, never bypass or disable blindfold. Need a value: ask the user. False positive: propose allow_ids/disabled_rules in ~/.config/blindfold/config.json, edit only after the user explicitly confirms that exact id or rule; never allow env:*. A real secret visible anywhere: lead with ⚠️ SECRET EXPOSED, name it, never repeat it, say rotate it. Load for examples."
+description: "ALWAYS ACTIVE, no need to load. Be cautious yourself first: work blind by default, avoid reading or printing secrets, env files or credentials unless the task needs it; blindfold's masking is only the last-resort failsafe. <blindfold kind=K len=N id=H> = a hidden value (kind: env:NAME known secret, or a rule like stripe-key/jwt/high-entropy; len; id: same value, same id). Work by name, presence, length, id. Never recover a value (re-read, cat/head/xxd/base64, split/encode, subagent, guess), never write a placeholder into a file, never bypass or disable blindfold. Need a value: ask the user. False positive: propose allow_ids/disabled_rules in ~/.config/blindfold/config.json, which only the user can change (blindfold refuses agent edits to its own files, config and hooks), so give them the exact command; never propose allowing env:*. A real secret visible anywhere: lead with ⚠️ SECRET EXPOSED, name it, never repeat it, say rotate it. Load for examples."
 ---
 
 # blindfold: secrets are masked, and that is intended
@@ -86,10 +86,10 @@ hash, a random-looking test fixture. If the task needs that value:
 2. Propose the narrowest override:
    - one value, by its id: add `"9b2e71"` to `allow_ids`
    - or, for a rule that's wrong in this setup, add its kind to `disabled_rules`
-3. Change `~/.config/blindfold/config.json` **only after the user explicitly confirms
-   that exact id or rule in this conversation.** "Yes, allow 9b2e71" is enough.
-   Silence, a vague "ok", a general instruction to "fix it", or your own
-   confidence that it's harmless is not.
+3. Give the user the exact command that makes the change, for them to run
+   (they can type `! <command>`). You can't change `~/.config/blindfold/config.json`
+   yourself: blindfold refuses agent changes to its own code, config, key, skill
+   and hook settings, so an accident can't switch masking off.
 4. Never allow a `env:*` kind (a known secret), never disable masking wholesale,
    and never remove blindfold's hooks, even with permission to "make it work". Point
    the user to the README instead.

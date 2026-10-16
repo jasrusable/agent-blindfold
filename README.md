@@ -30,7 +30,8 @@ git clone https://github.com/jasrusable/agent-blindfold ~/.local/share/agent-bli
 
 One install covers both agents (Grok reads Claude Code's hooks). Install from a
 clone you don't edit: the hook runs on every tool call in every session, so
-develop in another checkout and `git pull` the installed one when ready.
+develop in another checkout and `git pull` the installed one when ready. (You
+run the pull: agents can't change the installed copy.)
 
 ## What it catches
 
@@ -54,6 +55,9 @@ It also:
   withheld, not passed through.
 - **Can't lock you out.** If the pre-call check breaks, calls still go through,
   with a warning.
+- **Guards itself.** Agents can't edit the installed copy, its config or key,
+  or its hook entries in the agent settings, and can't turn hooks off. They
+  hand you the exact command instead, so an accident can't disable masking.
 - **Prefers false positives.** Over-masking costs a little friction; a leak
   costs a rotation.
 - **Works with your agent.** A skill and a session note tell the agent to

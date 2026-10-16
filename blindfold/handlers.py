@@ -17,7 +17,7 @@ from .mask import PLACEHOLDER_RE, Finding
 from .rules import PROMPT_BLOCKING_KINDS
 from .runtime import Runtime
 from .structure import mask_value, withhold
-from . import transcript
+from . import selfguard, transcript
 
 Reply = Optional[Dict[str, Any]]
 
@@ -39,9 +39,9 @@ Rules:
 1. Work blind: report secrets by name, presence, length and id, never by value. Let programs that load secrets themselves hold them. Compare by id.
 2. Never try to recover a masked value: no re-reading another way (cat, head -c, xxd, od, strings, sed, base64, rev, tr, cut, a few characters at a time), no encoding, splitting or hashing to slip past the mask, no subagent or script to repeat it, no guessing from length, id or context.
 3. Never write a placeholder into a file or command (it would replace the real secret; blindfold refuses it). Edit around masked parts.
-4. Never disable, reconfigure or bypass blindfold yourself.
+4. Never disable, reconfigure or bypass blindfold yourself. blindfold refuses agent changes to its own code, config, key, skill and hook settings; the user makes those.
 5. If a task needs a value you can't see, stop and ask the user, who can usually run one command.
-6. False positive (something clearly not secret was masked): explain it, then propose the narrowest override, its id in allow_ids or a rule in disabled_rules in ~/.config/blindfold/config.json. Edit that file only after the user explicitly confirms that exact id or rule in this conversation. Never allow env:* kinds.
+6. False positive (something clearly not secret was masked): explain it, then propose the narrowest override, its id in allow_ids or a rule in disabled_rules in ~/.config/blindfold/config.json, and give the user the exact command to make it; you can't edit that file. Never propose allowing env:* kinds.
 7. If a real secret's value is visible to you anywhere (a tool result blindfold missed, a user message, your own output), start your reply with "⚠️ SECRET EXPOSED: <name or kind>, seen in <where>. It reached the model provider and should be rotated." Never repeat the value. Name what to rotate."""
 
 
@@ -134,6 +134,13 @@ def pre_tool_use(event: Event, rt: Runtime) -> Reply:
     texts = event.tool_input_texts
     if _is_blocked_command(event, rt.config.blocked_commands):
         return _deny(BLOCKED_COMMAND_REASON)
+    changes_blindfold = selfguard.reason(event.tool_input, event.is_read_only_tool, event.cwd)
+    if changes_blindfold:
+        return _deny(
+            f"blindfold: this call would change blindfold itself ({changes_blindfold}). Agents don't modify "
+            "blindfold's installed code, config, key, skill or hook settings, so masking can't be switched off by "
+            "accident. Tell the user the exact change and let them make it (they can type `! <command>`)."
+        )
     if rt.config.guard_placeholders and not event.is_read_only_tool and any(PLACEHOLDER_RE.search(t) for t in texts):
         return _deny(
             "blindfold: this call contains a masked-secret placeholder (<blindfold kind= …>). The real value is what "

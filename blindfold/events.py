@@ -81,5 +81,10 @@ class Event:
         return value if isinstance(value, str) and value else None
 
     @property
+    def cwd(self) -> Optional[str]:
+        value = _first(self.raw, "cwd", "workingDirectory")
+        return value if isinstance(value, str) else None
+
+    @property
     def is_read_only_tool(self) -> bool:
         return self.tool in READ_ONLY_TOOLS
