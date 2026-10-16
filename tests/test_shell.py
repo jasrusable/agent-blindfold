@@ -43,6 +43,22 @@ class Parts(unittest.TestCase):
         self.assertFalse(shell.runs_substitution('cat > a <<"EOF"\n`x`\nEOF'))
         self.assertTrue(shell.runs_substitution("echo $(x) > a"))
 
+    def test_any_unquoted_opener_makes_a_body_expand(self):
+        self.assertTrue(shell.runs_substitution("cat <<'A' <<B\n$(x)\nA\nB"))
+
+    def test_plain_files_are_spelled_in_plain_path_characters(self):
+        for target in ("notes.md", "~/notes.md", "/tmp/a-b_c.txt", "out/x,y=1.log"):
+            self.assertTrue(shell.is_plain_file(target), target)
+        for target in ("{a,b}", "x[1]", "~root/x", "!x", "/dev/stdout", "/proc/1/fd/1", "*.md", "$OUT"):
+            self.assertFalse(shell.is_plain_file(target), target)
+
+    def test_a_later_part_runs_a_file_only_through_a_runner(self):
+        for later in ("bash x.sh", "sh -e ./x.sh", ". ./x.sh", "source x.sh", "./x.sh", "python3 x.sh",
+                      "echo $(sh x.sh)", "env FOO=1 bash x.sh"):
+            self.assertTrue(shell.runs_file(later, "x.sh"), later)
+        for later in ("wc -l < x.sh", "cat x.sh", "git add x.sh", "echo done", "bash y.sh", "ls x.sh.bak"):
+            self.assertFalse(shell.runs_file(later, "x.sh"), later)
+
     def test_heads_and_write_targets(self):
         self.assertEqual(shell.head("A=1 B=2 /usr/bin/env python3 x"), "env")
         self.assertEqual(shell.write_targets("cat > a.txt 2>/dev/null"), ["a.txt"])
@@ -68,6 +84,11 @@ class MentionsAreNotUses(unittest.TestCase):
         self.assertTrue(denied(f"cat > x.sh <<'EOF'\n{OP} read op://V/i/f\nEOF\nbash x.sh"))
         self.assertTrue(denied(f"cat > /dev/stdout <<'EOF'\n{OP} read op://V/i/f\nEOF"))
         self.assertTrue(denied(f"tee x.md <<'EOF' | bash\n{OP} read op://V/i/f\nEOF"))
+        self.assertTrue(denied(f"cat > x.py <<'EOF'\n{OP} read op://V/i/f\nEOF\npython3 x.py"))
+        self.assertTrue(denied(f"cat > x.sh <<'EOF'\n{OP} read op://V/i/f\nEOF\necho $(sh x.sh)"))
+
+    def test_a_note_followed_by_a_check_that_reads_it_is_fine(self):
+        self.assertFalse(denied(f"cat >> notes.md <<'EOF'\nNever run `{OP} read op://V/i/f`.\nEOF\necho \"lines: $(wc -l < notes.md)\""))
         self.assertTrue(denied(f'git commit -m "use `{OP} read op://V/i/f`"'))
 
     def test_an_example_placeholder_may_go_into_docs_but_not_into_code_or_config(self):

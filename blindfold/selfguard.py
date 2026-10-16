@@ -8,6 +8,7 @@ and it judges real use, not mentions: notes or docs that name a path are fine.
 
 import os
 import re
+import shlex
 from typing import Any, Dict, Iterable, List, Optional
 
 from . import shell
@@ -94,6 +95,11 @@ def is_read_only_command(command: str) -> bool:
     return all(_is_read_only_part(part) for part in shell.parts(command))
 
 
+# The directory after a cd we can't follow: maybe anywhere, so nothing that
+# writes relative to it counts as "elsewhere".
+_UNKNOWN = "<unknown directory>"
+
+
 def _data_targets(part: str, here: Optional[str]) -> Optional[List[str]]:
     """The files a plain cat/tee/echo/printf writes, resolved against here, or
     None if the part is anything else: what such a part says (a heredoc of
@@ -104,41 +110,65 @@ def _data_targets(part: str, here: Optional[str]) -> Optional[List[str]]:
     targets = shell.write_targets(part)
     if not targets or not all(shell.is_plain_file(t) for t in targets):
         return None
-    base = here or os.getcwd()
-    return [os.path.join(base, os.path.expanduser(t)) for t in targets]
+    expanded = [os.path.expanduser(t) for t in targets]
+    if here == _UNKNOWN and not all(os.path.isabs(t) for t in expanded):
+        return None
+    base = here if here and here != _UNKNOWN else os.getcwd()
+    return [os.path.join(base, t) for t in expanded]
 
 
-def _cd(line: str, here: Optional[str], protected: List[str]) -> Optional[str]:
-    """The directory after `cd …`, or None if it can't be known. A target that
-    names a protected path counts as inside it, however it's spelled."""
-    words = line.split()
-    target = os.path.expandvars(os.path.expanduser(words[1].strip("'\""))) if len(words) > 1 else os.path.expanduser("~")
-    if any(mark in target for mark in ("$", "`", "(")) or target == "-":
-        named = _named(line, protected)
-        return _resolve(named) if named else None
-    return os.path.normpath(os.path.join(here, target)) if here and not os.path.isabs(target) else os.path.abspath(target)
+def _cd(line: str, here: Optional[str], previous: Optional[str], protected: List[str]) -> Optional[str]:
+    """The directory after `cd …`, unquoted as the shell would. A target that
+    names a protected path, or contains one's folder name, counts as inside it
+    however it's spelled; any other target that can't be followed is unknown."""
+    try:
+        words = shlex.split(line)
+    except ValueError:
+        words = []
+    args = [word for word in words[1:] if not word.startswith("-") or word == "-"]
+    target = os.path.expandvars(os.path.expanduser(args[0])) if args else os.path.expanduser("~")
+    if target == "-":
+        return previous or _UNKNOWN
+    if not words or any(mark in target for mark in ("$", "`", "(")):
+        named = _named(line, protected) or next((root for root in protected if os.path.basename(_resolve(root)) in line), None)
+        return _resolve(named) if named else _UNKNOWN
+    if not os.path.isabs(target):
+        if here == _UNKNOWN:
+            return _UNKNOWN
+        if here:
+            return os.path.normpath(os.path.join(here, target))
+    return os.path.abspath(target)
 
 
 def _command_reason(command: str, cwd: Optional[str], protected: List[str], settings: List[str]) -> Optional[str]:
-    """Deny by default: once a command names a protected path, or runs inside
-    one, every part must be read-only or a plain data write elsewhere."""
+    """Deny by default: once a command names a protected path (outside here-
+    document bodies saved as data), or runs inside one, every part must be
+    read-only or a plain data write elsewhere that no later part runs."""
     guarded = protected + settings
-    names_protected = _named(command, protected)
-    here = cwd
-    for part in shell.parts(command):
+    names_protected = _named(shell.strip_data_heredocs(command), protected)
+    pairs = shell.split(command)
+    here, previous, key_written = cwd, None, False
+    for index, (part, _) in enumerate(pairs):
         line = shell.first_line(part)
         if shell.head(line) == "cd":
-            here = _cd(line, here, protected)
+            here, previous = _cd(line, here, previous, protected), here
             continue
         if _is_read_only_part(part):
             continue
+        if key_written:
+            return f"it writes {DISABLE_HOOKS} and then runs more"
         targets = _data_targets(part, here)
-        elsewhere = targets is not None and not any(_named(t, guarded) or _inside(t, guarded) for t in targets)
-        if DISABLE_HOOKS.lower() in part.lower() and not (elsewhere and not any(_SETTINGS_FILE.search(t) for t in targets or [])):
-            return f"it sets {DISABLE_HOOKS}"
+        later = "\n".join(p for p, _ in pairs[index + 1 :]) if targets else ""
+        elsewhere = targets is not None and not any(
+            _named(t, guarded) or _inside(t, guarded) or shell.runs_file(later, t) for t in targets
+        )
+        if DISABLE_HOOKS.lower() in part.lower():
+            if not elsewhere or any(_SETTINGS_FILE.search(t) for t in targets or []):
+                return f"it sets {DISABLE_HOOKS}"
+            key_written = True
         if elsewhere:
             continue
-        inside = _inside(here, protected) if here else None
+        inside = _inside(here, protected) if here and here != _UNKNOWN else None
         if inside or names_protected:
             return f"it changes {inside or names_protected}"
         if _named(part, settings):

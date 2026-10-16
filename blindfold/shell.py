@@ -102,15 +102,27 @@ def runs_substitution(part: str) -> bool:
     here-document body whose delimiter isn't quoted (<<EOF expands; <<'EOF'
     doesn't)."""
     line, _, body = part.partition("\n")
-    heredoc = _HEREDOC.search(line)
-    expanding = heredoc is None or not heredoc.group(2)
+    openers = list(_HEREDOC.finditer(line))
+    expanding = not openers or any(not opener.group(2) for opener in openers)
     return any(mark in line or (expanding and mark in body) for mark in ("$(", "`", "<(", ">("))
 
 
+_PLAIN_PATH = re.compile(r"(?:~/)?[A-Za-z0-9_./@%+,:=-]+")
+# A later part that runs a file: sh x, python3 x, source x, . x, ./x, or one
+# of those inside $(…).
+_RUNNER = r"(?:(?:^|[\s;&|(`])(?:sh|bash|zsh|dash|ksh|fish|source|exec|eval|env|xargs|python[0-9.]*|node|deno|bun|ruby|perl|php|osascript)\s+(?:\S+\s+){0,8}?|(?:^|\s)\.\s+|\./)"
+
+
 def is_plain_file(target: str) -> bool:
-    """A file on disk, not a device, descriptor or expansion that could be a
-    terminal, another process or anywhere at all."""
-    return not target.startswith(("/dev/", "/proc/", "&")) and not any(mark in target for mark in ("$", "`", "(", "*", "?"))
+    """A file on disk, named in plain path characters: not a device,
+    descriptor, glob, brace or other expansion that could go anywhere."""
+    return bool(_PLAIN_PATH.fullmatch(target)) and not target.startswith(("/dev/", "/proc/"))
+
+
+def runs_file(text: str, path: str) -> bool:
+    """Whether text runs the file at path (by its name)."""
+    name = path.rsplit("/", 1)[-1]
+    return bool(name) and re.search(_RUNNER + r"\S*" + re.escape(name) + r"(?![\w.-])", text) is not None
 
 
 def writes_heredoc_to_file(part: str) -> bool:
@@ -126,14 +138,15 @@ def writes_heredoc_to_file(part: str) -> bool:
 
 def strip_data_heredocs(command: str) -> str:
     """The command without the bodies of here-documents saved to files. Not
-    when piped on (`cat <<EOF | sh`), or when a later part names the file it
+    when piped on (`cat <<EOF | sh`), or when a later part runs the file it
     wrote (`cat > x.sh <<EOF … ; bash x.sh`): then the body may be run."""
     pairs = split(command)
     kept = []
     for index, (part, separator) in enumerate(pairs):
-        later = " ".join(p for p, _ in pairs[index + 1 :])
-        names = [t.rsplit("/", 1)[-1] for t in write_targets(part)]
-        data = writes_heredoc_to_file(part) and separator != "|" and not any(n and n in later for n in names)
+        data = writes_heredoc_to_file(part) and separator != "|"
+        if data:
+            later = "\n".join(p for p, _ in pairs[index + 1 :])
+            data = not any(runs_file(later, target) for target in write_targets(part))
         kept.append(first_line(part) if data else part)
     return "\n".join(kept)
 

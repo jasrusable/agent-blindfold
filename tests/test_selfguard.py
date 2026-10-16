@@ -128,6 +128,25 @@ class SelfGuard(unittest.TestCase):
         # Deny by default: a command that names a protected path may only read or write notes elsewhere.
         self.assertTrue(self.reason({"command": f"cd {install} && cd /tmp && rm -rf scratch"}))
 
+    def test_a_note_naming_a_path_then_a_check_that_reads_it_is_fine(self):
+        command = f"cat >> notes.md <<'EOF'\nUpdate: git -C {self.install} pull\nEOF\necho \"lines: $(wc -l < notes.md)\""
+        self.assertIsNone(self.reason({"command": command}))
+        written_then_run = f"cat > x.sh <<'EOF'\nrm -rf {self.install}\nEOF\nbash x.sh"
+        self.assertTrue(self.reason({"command": written_then_run}))
+        self.assertTrue(self.reason({"command": f"echo 'rm -rf {self.install}' > x.sh; bash x.sh"}))
+
+    def test_cd_targets_that_cannot_be_followed(self):
+        install = self.install
+        self.assertTrue(self.reason({"command": f'cd "$(dirname {install})/install" && rm x'}))
+        self.assertTrue(self.reason({"command": "cd install && cd /tmp && cd - && rm x"}, cwd=self.root))
+        self.assertTrue(self.reason({"command": f"cd '{install}' && rm x"}))
+        self.assertIsNone(self.reason({"command": 'cd "$(git rev-parse --show-toplevel)" && make'}))
+
+    def test_the_hook_off_setting_written_in_two_steps_is_refused(self):
+        key = "disable" + "AllHooks"
+        command = f"printf '{{\"{key}\": true}}' > /tmp/s.json && cp /tmp/s.json proj/.claude/settings.json"
+        self.assertTrue(self.reason({"command": command}))
+
     def test_indirection_and_relative_paths_are_followed(self):
         install, rel = self.install, self.install[len(os.path.expanduser("~")) + 1 :]
         for command, cwd in (
