@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-blindfold"
+dynamic = ["version"]
+description = "Mask secrets in AI coding agents' tool output (Claude Code, Grok) before the model sees them"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+blindfold = "blindfold.cli:main"
+
+[tool.setuptools]
+packages = ["blindfold"]
+
+[tool.setuptools.dynamic]
+version = {attr = "blindfold.__version__"}

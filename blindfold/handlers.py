@@ -1,0 +1,208 @@
+"""One pure function per hook event: (event, runtime) -> reply or None.
+
+Reply shapes are the ones Claude Code and Grok both honour:
+- PostToolUse: `updatedToolOutput` in the tool's own shape (Claude ignores
+  anything else, a plain string included), plus `additionalContext`.
+- PreToolUse: `permissionDecision: deny` with a reason.
+- UserPromptSubmit: `decision: block` with a reason.
+- Stop: `systemMessage`, shown to the user.
+"""
+
+from typing import Any, Callable, Dict, List, Optional
+
+from .bash import wrap
+from .events import Event
+from .mask import PLACEHOLDER_RE, Finding
+from .rules import PROMPT_BLOCKING_KINDS
+from .runtime import Runtime
+from .structure import mask_value, withhold
+from . import transcript
+
+Reply = Optional[Dict[str, Any]]
+
+WITHHELD = (
+    "<blindfold: output withheld because the secret masker failed. The tool did run; "
+    "don't re-run it blindly, ask the user to check `blindfold doctor`>"
+)
+
+SESSION_NOTE = """blindfold secret masking is active in this session. Secrets in tool results (file reads, command output, search, MCP) are replaced before you see them, and that is intended.
+
+Placeholder: <blindfold kind=env:STRIPE_API_KEY len=107 id=3f9a1c>
+- kind: why it was masked. env:NAME is the exact value of a known secret; a rule name (stripe-key, private-key, jwt, url-password, auth-header, env-assignment, named-secret, cli-secret-flag, high-entropy, ...) means it matched a secret's shape or name.
+- len: the value's length. id: a keyed fingerprint, same value same id, not reversible.
+- <blindfold: output withheld ...> means the masker failed and hid everything. The tool did run; don't re-run it blindly.
+- "[blindfold: exit code N; reported as success so its output could be masked]" at the end of a command's output means the command FAILED with exit code N. Treat it as a failure.
+
+Rules:
+0. You are the first line of defence, blindfold is the safety net: be cautious with anything that is or might be sensitive, work blind by default, and don't read secret files, dump env vars or print config unless the task needs it (prefer commands that report names, presence or lengths). Masking can miss things.
+1. Work blind: report secrets by name, presence, length and id, never by value. Let programs that load secrets themselves hold them. Compare by id.
+2. Never try to recover a masked value: no re-reading another way (cat, head -c, xxd, od, strings, sed, base64, rev, tr, cut, a few characters at a time), no encoding, splitting or hashing to slip past the mask, no subagent or script to repeat it, no guessing from length, id or context.
+3. Never write a placeholder into a file or command (it would replace the real secret; blindfold refuses it). Edit around masked parts.
+4. Never disable, reconfigure or bypass blindfold yourself.
+5. If a task needs a value you can't see, stop and ask the user, who can usually run one command.
+6. False positive (something clearly not secret was masked): explain it, then propose the narrowest override, its id in allow_ids or a rule in disabled_rules in ~/.config/blindfold/config.json. Edit that file only after the user explicitly confirms that exact id or rule in this conversation. Never allow env:* kinds.
+7. If a real secret's value is visible to you anywhere (a tool result blindfold missed, a user message, your own output), start your reply with "⚠️ SECRET EXPOSED: <name or kind>, seen in <where>. It reached the model provider and should be rotated." Never repeat the value. Name what to rotate."""
+
+
+def summarize(findings: List[Finding]) -> str:
+    kinds: Dict[str, int] = {}
+    for finding in findings:
+        kinds[finding.kind] = kinds.get(finding.kind, 0) + 1
+    listed = ", ".join(f"{kind} x{count}" if count > 1 else kind for kind, count in sorted(kinds.items()))
+    return (
+        f"blindfold masked {len(findings)} potential secret(s) in this tool output ({listed}). "
+        "The values are hidden on purpose: don't try to recover, guess or reconstruct them, "
+        "and don't write a placeholder into a file. Work with names, lengths and ids instead."
+    )
+
+
+def _context(*parts: Optional[str]) -> str:
+    return "\n\n".join(part for part in parts if part)
+
+
+DRIFT_WARNING = (
+    "blindfold did not recognise this tool event's result field (the agent's hook format may have changed), "
+    "so it masked its best guess. Tell the user to run `blindfold selftest --agent <name>`."
+)
+
+
+def unmaskable_failure(event: Event, findings: List[Finding]) -> Reply:
+    """Claude can't replace a failed call's output, so the model saw these raw: tell the user now."""
+    kinds = ", ".join(sorted({f.kind for f in findings}))
+    return {
+        "systemMessage": (
+            f"⚠️ blindfold: a failed {event.tool or 'tool'} call's output held {len(findings)} secret(s) ({kinds}). "
+            "Claude Code doesn't let hooks mask a failed call's output, so they reached the model. Rotate them."
+        ),
+        "hookSpecificOutput": {
+            "hookEventName": event.name,
+            "additionalContext": (
+                f"This failed call's output contained {len(findings)} secret(s) ({kinds}) that could NOT be masked. "
+                "Tell the user loudly that they were exposed and must be rotated. Don't repeat or use them."
+            ),
+        },
+    }
+
+
+def post_tool_use(event: Event, rt: Runtime) -> Reply:
+    if event.result_key is None:
+        return None
+    masked, findings = mask_value(rt.masker, event.result)
+    if findings and event.name == "PostToolUseFailure" and not event.is_grok:
+        return unmaskable_failure(event, findings)
+    note = _context(summarize(findings) if findings else None, None if event.result_key_is_known else DRIFT_WARNING, rt.warning)
+    if not findings:
+        return {"hookSpecificOutput": {"hookEventName": event.name, "additionalContext": note}} if note else None
+    return {"hookSpecificOutput": {"hookEventName": event.name, "updatedToolOutput": masked, "additionalContext": note}}
+
+
+def _deny(reason: str) -> Dict[str, Any]:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}
+
+
+def known_names_in(rt: Runtime, texts: List[str]) -> List[str]:
+    """Known secrets whose real value is in texts. Word-like values don't count:
+    they also turn up in ordinary text, so they never refuse a call or alarm."""
+    _, findings = rt.masker.mask("\n".join(texts)) if texts else ("", [])
+    return sorted({f.kind[4:] for f in findings if f.kind.startswith("env:") and not f.weak})
+
+
+def pre_tool_use(event: Event, rt: Runtime) -> Reply:
+    texts = event.tool_input_texts
+    if rt.config.guard_placeholders and not event.is_read_only_tool and any(PLACEHOLDER_RE.search(t) for t in texts):
+        return _deny(
+            "blindfold: this call contains a masked-secret placeholder (<blindfold kind= …>). The real value is what "
+            "belongs there, so writing or sending the placeholder would replace or corrupt it, and an "
+            "old_string containing one can't match the file. Edit around the masked part (pick an old_string "
+            "that excludes it), leave that value as it is, or ask the user to change it."
+        )
+    if rt.config.guard_known_values:
+        leaked = known_names_in(rt, texts)
+        if leaked:
+            return _deny(
+                "blindfold: this call contains the actual value of a known secret "
+                f"({', '.join(leaked)}). It must not be in a command, file or request. Stop and tell the user "
+                "LOUDLY that the secret reached the agent's context and should be rotated."
+            )
+    return _wrapped_bash(event, rt)
+
+
+def _wrapped_bash(event: Event, rt: Runtime) -> Reply:
+    """Claude only: rewrite a Bash command to exit 0 so its output can be masked (see bash.py)."""
+    tool_input = event.tool_input
+    if event.is_grok or event.tool != "Bash" or not rt.config.wrap_claude_bash or not isinstance(tool_input, dict):
+        return None
+    command = tool_input.get("command")
+    if not isinstance(command, str) or wrap(command) == command:
+        return None
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {**tool_input, "command": wrap(command)}}}
+
+
+def user_prompt_submit(event: Event, rt: Runtime) -> Reply:
+    texts = event.prompt_texts
+    _, findings = rt.masker.mask("\n".join(texts)) if texts else ("", [])
+    blocking = [f for f in findings if (f.kind.startswith("env:") and not f.weak) or f.kind in PROMPT_BLOCKING_KINDS]
+    if not blocking:
+        return None
+    found = ", ".join(sorted({f"{f.kind[4:] if f.kind.startswith('env:') else f.kind} (id {f.fingerprint})" for f in blocking}))
+    return {
+        "decision": "block",
+        "reason": (
+            f"⚠️ blindfold: your prompt contains what looks like a real secret: {found}. It was blocked before reaching "
+            "the model. Remove the value and send it again, referring to the secret by name. If it isn't secret, "
+            "add its id to allow_ids in ~/.config/blindfold/config.json."
+        ),
+    }
+
+
+def stop(event: Event, rt: Runtime) -> Reply:
+    texts = list(event.last_message_texts)
+    # Grok's transcript keeps every original output by design, so only Claude's
+    # (which stores the masked version) can show a value that got through.
+    if event.transcript_path and not event.is_grok:
+        texts.append(transcript.tail(event.transcript_path))
+    names = known_names_in(rt, texts)
+    if not names:
+        return None
+    return {
+        "systemMessage": (
+            f"⚠️ blindfold: the actual value of {', '.join(names)} reached the model this session (in the agent's "
+            "reply, a tool result blindfold didn't mask, or a prompt). Treat it as exposed and rotate it."
+        )
+    }
+
+
+def session_start(_event: Event, rt: Runtime) -> Reply:
+    return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": _context(SESSION_NOTE, rt.warning)}}
+
+
+HANDLERS: Dict[str, Callable[[Event, Runtime], Reply]] = {
+    "PostToolUse": post_tool_use,
+    "PostToolUseFailure": post_tool_use,
+    "PreToolUse": pre_tool_use,
+    "UserPromptSubmit": user_prompt_submit,
+    "Stop": stop,
+    "SessionStart": session_start,
+}
+
+
+def handle(event: Event, rt: Runtime) -> Reply:
+    handler = HANDLERS.get(event.name)
+    return handler(event, rt) if handler else None
+
+
+def withheld_reply(event: Event) -> Reply:
+    """The fail-closed reply when masking itself failed."""
+    if event.name in ("PostToolUse", "PostToolUseFailure") and event.result_key is not None:
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": event.name,
+                "updatedToolOutput": withhold(event.result, WITHHELD),
+                "additionalContext": "blindfold failed while masking this output, so all of its text was withheld.",
+            }
+        }
+    if event.name == "PreToolUse":
+        return _deny("blindfold failed while checking this call for secrets, so it was blocked. Ask the user to check `blindfold doctor`.")
+    if event.name == "UserPromptSubmit":
+        return {"decision": "block", "reason": "blindfold failed while checking this prompt for secrets, so it was blocked. Run `blindfold doctor`."}
+    return None

@@ -1,0 +1,8 @@
+# The test corpus assembles fake secrets at runtime, but its fixtures still
+# contain fragments shaped like secrets. Nothing in tests/ is a real credential.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "blindfold test fixtures"
+paths = ['''tests/''']

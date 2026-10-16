@@ -1,0 +1,28 @@
+# blindfold: notes for agents working on this repo
+
+blindfold masks secrets in AI agents' tool output. It is security code that must
+**fail closed**: when in doubt, mask; when masking fails, withhold.
+
+- **Layout:**
+  - `blindfold/rules.py`: patterns and name and value judgement. Data plus small pure functions.
+  - `blindfold/known.py`: known secret values from files and env.
+  - `blindfold/mask.py`: the engine.
+  - `blindfold/structure.py`: shape-preserving JSON walk.
+  - `blindfold/events.py`: one view of Claude and Grok events.
+  - `blindfold/handlers.py`: one pure function per hook event.
+  - `blindfold/runtime.py`: config and masker, with the safe fallback.
+  - `blindfold/hook.py`: process I/O, never raises.
+- **Invariants (each one has tests):**
+  - A PostToolUse reply keeps the tool's exact structure and types; Claude ignores anything else.
+  - Nothing in `hook.py` may raise.
+  - The walk is iterative.
+  - Placeholders follow `PLACEHOLDER_RE`.
+  - Masking is idempotent.
+  - Text that only looks like a placeholder gets no protection.
+- **Tests first:**
+  - Every false positive or negative found in the wild becomes a corpus case in `tests/corpus.py`.
+  - Build fake secrets from fragments (`j("sk", "_live_", …)`), never as literals.
+  - Run `python3 -m unittest discover -s tests -t .` (also under Python 3.9).
+  - After touching hook I/O, run `bin/blindfold selftest --agent claude --agent grok`.
+- **Calibrate on real code:** `scripts/fp_eval.py <repos>` prints only masked lines.
+- **Keep it simple:** Python stdlib only, no dependencies. Prefer data plus one generic path over special cases.
