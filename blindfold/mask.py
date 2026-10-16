@@ -195,14 +195,18 @@ def trie_pattern(words: Iterable[str]) -> str:
             node = node.setdefault(char, {})
         node[""] = {}
 
-    def build(node: Dict[str, Any]) -> str:
-        branches = [re.escape(char) + build(child) for char, child in sorted(node.items()) if char]
-        if not branches:
-            return ""
-        body = branches[0] if len(branches) == 1 else "(?:" + "|".join(branches) + ")"
-        return f"(?:{body})?" if "" in node else body
-
-    return build(trie)
+    # Built children-first without recursion: a long value is one node per character.
+    order, stack = [], [trie]
+    while stack:
+        node = stack.pop()
+        order.append(node)
+        stack.extend(child for char, child in node.items() if char)
+    built: Dict[int, str] = {}
+    for node in reversed(order):
+        branches = [re.escape(char) + built[id(child)] for char, child in sorted(node.items()) if char]
+        body = "" if not branches else branches[0] if len(branches) == 1 else "(?:" + "|".join(branches) + ")"
+        built[id(node)] = f"(?:{body})?" if body and "" in node else body
+    return built[id(trie)]
 
 
 def _line_of(match: Match[str]) -> Tuple[int, int]:

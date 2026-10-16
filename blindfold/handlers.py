@@ -12,7 +12,6 @@ import re
 from typing import Any, Callable, Dict, List, Optional
 
 from .bash import wrap
-from .config import DEFAULT_BLOCKED_COMMANDS
 from .events import Event
 from .mask import PLACEHOLDER_RE, Finding
 from .rules import PROMPT_BLOCKING_KINDS
@@ -116,9 +115,19 @@ BLOCKED_COMMAND_REASON = (
 )
 
 
-def _is_blocked_command(event: Event, patterns: List[str]) -> bool:
+def _command(event: Event) -> Optional[str]:
     command = event.tool_input.get("command") if isinstance(event.tool_input, dict) else None
-    return isinstance(command, str) and any(re.search(pattern, command, re.MULTILINE) for pattern in patterns)
+    return command if isinstance(command, str) else None
+
+
+def _is_blocked_command(event: Event, patterns: List[str]) -> bool:
+    command = _command(event)
+    return command is not None and any(re.search(pattern, command, re.MULTILINE) for pattern in patterns)
+
+
+# When the full check failed (or ran out of time), a linear-time stand-in: any
+# command naming the Keychain or 1Password CLI is refused.
+_MAYBE_BLOCKED = re.compile(r"\b(?:op|security)\b")
 
 
 def pre_tool_use(event: Event, rt: Runtime) -> Reply:
@@ -221,9 +230,9 @@ def withheld_reply(event: Event) -> Reply:
     # is masking the output afterwards (which still withholds on failure), and
     # refusing everything would lock the user and every agent out over a bug.
     if event.name == "PreToolUse":
-        # Except for the built-in blocked commands: their output is a bare secret
-        # that masking afterwards can't recognise.
-        if _is_blocked_command(event, DEFAULT_BLOCKED_COMMANDS):
+        # Except for commands that may print a bare secret, which masking
+        # afterwards can't recognise.
+        if _MAYBE_BLOCKED.search(_command(event) or ""):
             return _deny(BLOCKED_COMMAND_REASON)
         note = "blindfold's pre-call check failed, so this call was allowed unchecked. Tell the user to run `blindfold doctor`."
         reply: Dict[str, Any] = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": note}}

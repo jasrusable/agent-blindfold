@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -315,6 +316,47 @@ class ThirdReview(unittest.TestCase):
         self.assertNotIn(tainted, json.dumps(out))
         self.assertTrue(findings)
         self.assertEqual(mask_value(M, {"type": "image", "file": {"base64": clean}}), ({"type": "image", "file": {"base64": clean}}, []))
+
+
+DASHES = "-" * 5
+
+
+class FifthReview(unittest.TestCase):
+    def test_the_known_value_regex_needs_no_deep_recursion(self):
+        import sys
+        from blindfold.mask import trie_pattern
+
+        limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(200)
+        try:
+            words = [corpus.rand(5000), corpus.rand(3000), "ab", "abc"]
+            pattern = trie_pattern(words)
+        finally:
+            sys.setrecursionlimit(limit)
+        for word in words:
+            self.assertEqual(re.fullmatch(pattern, word).group(0), word)
+
+    def test_a_multi_line_pem_in_a_dotenv_is_known_line_by_line_but_not_its_header(self):
+        body = [corpus.rand(64), corpus.rand(64), corpus.rand(20)]
+        pem = "\n".join([f"{DASHES}BEGIN PRIVATE KEY{DASHES}", *body, f"{DASHES}END PRIVATE KEY{DASHES}"])
+        known = parse_env_text(f'A=1\nPRIVATE_KEY="{pem}"\nB_TOKEN={corpus.rand(30)}\n', 8)
+        values = {k.value for k in known}
+        self.assertIn(pem, values)
+        self.assertTrue(set(body) <= values)
+        self.assertFalse(any(v.startswith((DASHES, '"')) for v in values - {pem}))
+        self.assertIn("B_TOKEN", {k.name for k in known})
+
+    def test_an_unterminated_quote_runs_to_the_end(self):
+        known = parse_env_text(f'X_SECRET="{corpus.rand(30)}\nY_SECRET={corpus.rand(30)}\n', 8)
+        self.assertEqual({k.name for k in known}, {"X_SECRET"})
+
+    def test_after_a_failed_check_a_command_naming_op_or_security_is_refused(self):
+        from blindfold.events import Event
+        from blindfold.handlers import withheld_reply
+
+        for command, denied in ((f"{OP} item list", True), (f"{KEYCHAIN} list-keychains", True), ("ls -la", False)):
+            out = withheld_reply(Event({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}))
+            self.assertEqual(out["hookSpecificOutput"].get("permissionDecision") == "deny", denied, command)
 
 
 class FourthReview(unittest.TestCase):

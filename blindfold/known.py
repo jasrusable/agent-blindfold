@@ -46,7 +46,7 @@ class KnownSecret:
 
 # A dotenv value: quoted (the quotes end it, a comment may follow) or bare (a
 # ` #` starts a comment).
-_QUOTED_VALUE = re.compile(r"""^(["'`])(.*?)\1(?:\s+#.*)?$""")
+_QUOTED_VALUE = re.compile(r"""^(["'`])(.*?)\1(?:\s+#.*)?$""", re.DOTALL)
 
 
 def _unquote(raw: str) -> str:
@@ -58,8 +58,8 @@ def _unquote(raw: str) -> str:
     return value[:hash_at].rstrip() if hash_at >= 0 else value
 
 
-# Longer values are skipped: the trie built from known values recurses per
-# character, and a value this long is a key file the PEM rule covers anyway.
+# Longer values are skipped to bound the known-value regex; a value this long is
+# a key file, whose lines are known values of their own.
 MAX_KNOWN_LENGTH = 8192
 
 
@@ -87,15 +87,42 @@ def is_secret_value(name: str, value: str, min_length: int) -> bool:
     return len(value) >= 20 and shannon_entropy(value) >= 3.8 and not re.search(r"[\s/]", value)
 
 
-def parse_env_text(text: str, min_length: int) -> List[KnownSecret]:
-    found = []
-    for line in text.splitlines():
-        if line.lstrip().startswith("#"):
-            continue
-        match = ENV_LINE.match(line)
+def _env_entries(text: str) -> List[Tuple[str, str]]:
+    """(name, raw value) pairs; a quoted value may span lines (a PEM key)."""
+    entries, lines, at = [], text.splitlines(), 0
+    while at < len(lines):
+        line, at = lines[at], at + 1
+        match = None if line.lstrip().startswith("#") else ENV_LINE.match(line)
         if not match:
             continue
-        name, value = match.group(1), _unquote(match.group(2))
+        raw = match.group(2).strip()
+        quote = raw[:1]
+        if quote in ("'", '"') and quote not in raw[1:]:
+            rest = []
+            while at < len(lines) and quote not in lines[at]:
+                rest.append(lines[at])
+                at += 1
+            if at < len(lines):
+                rest.append(lines[at][: lines[at].index(quote) + 1])
+                at += 1
+            raw = "\n".join([raw, *rest])
+        entries.append((match.group(1), raw))
+    return entries
+
+
+def _key_lines(value: str) -> List[str]:
+    """The body lines of a multi-line value, which output often shows one at a
+    time. PEM BEGIN/END lines are public boilerplate, never secrets."""
+    return [line.strip() for line in value.splitlines() if line.strip() and not line.lstrip().startswith("-----")] if "\n" in value else []
+
+
+def parse_env_text(text: str, min_length: int) -> List[KnownSecret]:
+    found = []
+    for name, raw in _env_entries(text):
+        value = _unquote(raw)
+        for line in _key_lines(value):
+            if is_secret_value(name, line, min_length):
+                found.append(KnownSecret(line, name, is_weak(line)))
         # The password inside a URL is a secret of its own, judged the same way
         # (a local `postgres:password@localhost` must not hide the word "password").
         password = URL_PASSWORD.match(value)
