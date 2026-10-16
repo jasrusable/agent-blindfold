@@ -71,7 +71,8 @@ class SelfGuard(unittest.TestCase):
             f"cd {install} && make", f"echo $(cat {install}/x)", f"sed -i '' 's/a/b/' {self.config}/config.json",
             f"chmod -R u+w {install}", f"find {install} -name '*.py' -delete", f"cp evil.py {self.link}/x.py",
             f"sed -i '' '/blindfold/d' {self.settings}", f"cat > {self.settings} <<'EOF'\n{{\"permissions\": {{}}}}\nEOF",
-            f"python3 -c 'print(1)' > {self.settings}",
+            f"python3 -c 'print(1)' > {self.settings}", f'grep x {install}/y "$(rm -rf {install})"',
+            f"grep 'unbalanced {install}/y > z", f"cat {install}/x '|' > out",
         ):
             with self.subTest(command=command):
                 self.assertTrue(self.reason({"command": command}))
@@ -83,6 +84,8 @@ class SelfGuard(unittest.TestCase):
             f"grep -rn rule {install}/blindfold | head -5", f"{install}/bin/blindfold doctor", f"{install}/bin/blindfold install",
             f"echo '{{}}' | {install}/bin/blindfold hook", f"cd {install} && git status", f"wc -l {self.config}/config.json 2>&1",
             f"jq . {self.settings}", "rm -rf build/",
+            f'{install}/bin/blindfold selftest --installed --agent claude 2>&1 | grep -E "hooks run|PASS|FAIL"',
+            f"grep -n 'a > b; c' {install}/x", f'grep "say \\"hi\\" | there" {install}/x',
         ):
             with self.subTest(command=command):
                 self.assertIsNone(self.reason({"command": command}))

@@ -38,6 +38,10 @@ _READ_ONLY_PART = re.compile(
     r")\s*"
 )
 _HARMLESS_REDIRECT = re.compile(r"\d?>&\d|\d?>\s*/dev/null")
+# Quoted text is literal to the shell (except substitution, checked on the raw
+# command), so a | or > inside a grep pattern doesn't split or redirect. An
+# unbalanced quote stays in place and makes the command look unsafe.
+_QUOTED = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
 
 
 def _resolve(path: str) -> str:
@@ -62,9 +66,12 @@ def _spellings(path: str) -> List[str]:
 
 
 def is_read_only_command(command: str) -> bool:
-    if ">" in _HARMLESS_REDIRECT.sub("", command) or "`" in command or "$(" in command:
+    if "`" in command or "$(" in command:
         return False
-    parts = re.split(r"&&|\|\||[;|\n]", command)
+    bare = _QUOTED.sub("Q", command)
+    if ">" in _HARMLESS_REDIRECT.sub("", bare) or "'" in bare or '"' in bare:
+        return False
+    parts = re.split(r"&&|\|\||[;|\n]", bare)
     return all(_READ_ONLY_PART.fullmatch(part) for part in parts if part.strip())
 
 
