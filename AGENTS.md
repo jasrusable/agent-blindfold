@@ -15,7 +15,8 @@ blindfold masks secrets in AI agents' tool output. It is security code that must
 - **Invariants (each one has tests):**
   - A PostToolUse reply keeps the tool's exact structure and types; Claude ignores anything else.
   - Nothing in `hook.py` may raise.
-  - The walk is iterative.
+  - The walk and the known-value regex build are iterative (no deep recursion).
+  - Masking runs under a hard deadline (a killed child process), not just SIGALRM.
   - Placeholders follow `PLACEHOLDER_RE`.
   - Masking is idempotent.
   - Text that only looks like a placeholder gets no protection.
@@ -26,5 +27,6 @@ blindfold masks secrets in AI agents' tool output. It is security code that must
   - After touching hook I/O, run `bin/blindfold selftest --agent claude --agent grok`.
 - **Calibrate on real code:** `scripts/fp_eval.py <repos>` prints only masked lines.
 - **Never point the installed hook at a working copy:** it runs on every tool call of every session on the machine. Develop here, test, then `git -C ~/.local/share/agent-blindfold pull`.
-- **Fail safe before a call, closed after it:** a PreToolUse/UserPromptSubmit failure lets the call or prompt through with a warning; a PostToolUse failure withholds the output.
+- **Fail safe before a call, closed after it:** a PreToolUse/UserPromptSubmit failure lets the call or prompt through with a warning (still refusing commands that name the 1Password or Keychain CLI); a PostToolUse failure withholds the output.
+- **Docs:** `README.md` stays short; details go in `docs/design.md`. The guard refuses an agent writing a literal placeholder, so tests assemble them at runtime and doc examples are inserted by a script.
 - **Keep it simple:** Python stdlib only, no dependencies. Prefer data plus one generic path over special cases.
