@@ -8,6 +8,7 @@ Reply shapes are the ones Claude Code and Grok both honour:
 - Stop: `systemMessage`, shown to the user.
 """
 
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 from .bash import wrap
@@ -107,8 +108,21 @@ def known_names_in(rt: Runtime, texts: List[str]) -> List[str]:
     return sorted({f.kind[4:] for f in findings if f.kind.startswith("env:") and not f.weak})
 
 
+def _blocked_command(event: Event, rt: Runtime) -> Optional[str]:
+    command = event.tool_input.get("command") if isinstance(event.tool_input, dict) else None
+    if not isinstance(command, str):
+        return None
+    return next((pattern for pattern in rt.config.blocked_commands if re.search(pattern, command)), None)
+
+
 def pre_tool_use(event: Event, rt: Runtime) -> Reply:
     texts = event.tool_input_texts
+    if _blocked_command(event, rt):
+        return _deny(
+            "blindfold: this command prints a secret on its own (a Keychain or 1Password read), which can't be "
+            "masked because nothing marks it as a secret. Use a tool that consumes the secret itself "
+            "(`op run`, a CLI that loads its own credentials), or ask the user to run it."
+        )
     if rt.config.guard_placeholders and not event.is_read_only_tool and any(PLACEHOLDER_RE.search(t) for t in texts):
         return _deny(
             "blindfold: this call contains a masked-secret placeholder (<blindfold kind= …>). The real value is what "

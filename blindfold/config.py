@@ -19,6 +19,15 @@ _ENV_DIRS = ["~", "~/projects/*", "~/projects/*/*", "~/projects/*/worktrees/*/*"
 DEFAULT_SOURCES = ["~/.config/*/*.env", "~/.config/*/.env"] + [f"{d}/{n}" for d in _ENV_DIRS for n in _ENV_NAMES]
 
 
+# macOS Keychain reads that print the password, and 1Password reads.
+DEFAULT_BLOCKED_COMMANDS = [
+    r"\bsecurity\s+(?:find-(?:generic|internet)-password\b[^|;&]*\s-[a-zA-Z]*[wg]|dump-keychain)",
+    r"\bop\s+(?:read|inject)\b",
+    r"\bop\s+item\s+get\b[^|;&]*(?:--reveal|--fields|--format)",
+    r"\bop\s+document\s+get\b",
+]
+
+
 @dataclass
 class Config:
     # Files whose values are masked by exact match (dotenv-style KEY=value):
@@ -41,6 +50,9 @@ class Config:
     # corrupt the real value) or a known secret's value.
     guard_placeholders: bool = True
     guard_known_values: bool = True
+    # Commands whose whole output is a bare secret, which no rule can recognise:
+    # refused outright (regexes, matched against Bash commands).
+    blocked_commands: List[str] = field(default_factory=lambda: list(DEFAULT_BLOCKED_COMMANDS))
     # Make Claude Code Bash commands exit 0 (reporting the real code) so their
     # output can be masked; Claude can't replace a failed call's output.
     wrap_claude_bash: bool = True

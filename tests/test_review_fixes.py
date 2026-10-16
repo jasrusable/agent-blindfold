@@ -64,12 +64,25 @@ class BashWrapper(unittest.TestCase):
         self.assertTrue(bash.wrap("docker exec app ls").split("\n")[1] == "{")
         self.assertTrue(bash.wrap("find . -exec ls {} +").split("\n")[1] == "{")
 
-    def test_idempotent_and_skips_what_it_cannot_wrap_safely(self):
+    def test_idempotent_and_skips_only_comment_only_commands(self):
         once = bash.wrap("ls")
         self.assertEqual(bash.wrap(once), once)
-        self.assertEqual(bash.wrap("echo a \\"), "echo a \\")
         self.assertEqual(bash.wrap("   "), "   ")
         self.assertEqual(bash.wrap("# note\n\n"), "# note\n\n")
+
+    def test_commands_that_could_dodge_the_trap_are_still_reported(self):
+        for shell in ("/bin/zsh", "/bin/bash"):
+            for command, code in (
+                ("echo a; false \\", 1),
+                (f"echo '{bash.MARKER}'; exit 2", 2),
+                ("exec false", 1),
+                ("trap - EXIT; exit 3", 3),
+                ("trap '' EXIT; echo x; exit 4", 4),
+            ):
+                with self.subTest(shell=shell, command=command):
+                    proc = self.run_wrapped(command, shell)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertIn(f"{bash.MARKER} {code};", proc.stderr)
 
 
 class Prompts(unittest.TestCase):
@@ -202,6 +215,15 @@ class RoundTwo(unittest.TestCase):
         out = reply({"hook_event_name": "UserPromptSubmit", "prompt": f"use {corpus.GITHUB_PAT}"}, M)
         self.assertRegex(out["reason"], r"id [0-9a-f]{6}")
 
+    def test_base64_text_under_a_skip_key_is_masked_but_images_are_not(self):
+        import base64 as b64
+
+        encoded_env = b64.b64encode(f"STRIPE_API_KEY={corpus.STRIPE_LIVE}\nOTHER=1\n".encode()).decode()
+        masked = deep_map({"base64": encoded_env}, lambda s: M.mask(s)[0])
+        self.assertNotEqual(masked["base64"], encoded_env)
+        png = b64.b64encode(b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4).decode()
+        self.assertEqual(deep_map({"base64": png}, lambda s: M.mask(s)[0])["base64"], png)
+
     def test_skip_keys_only_skip_real_blobs(self):
         url = "https://bucket.s3.amazonaws.com/x?X-Amz-Signature=" + corpus.hexs(64)
         masked = deep_map({"image": url, "base64": corpus.rand(200, corpus.ALNUM + "+/")}, lambda s: M.mask(s)[0])
@@ -213,6 +235,26 @@ class RoundTwo(unittest.TestCase):
         huge = "%" * 7000 + corpus.rand(20)
         m = Masker(known=[KnownSecret(huge, "BIG_SECRET")], key=b"h" * 32)
         self.assertEqual(m.mask("ordinary text")[1], [])
+
+
+# Assembled at runtime so no file spells out a full secret-dump command.
+KEYCHAIN = "secu" + "rity"
+
+
+class BlockedCommands(unittest.TestCase):
+    def test_bare_secret_dumps_are_refused(self):
+        for command in (f"{KEYCHAIN} find-" "generic-password -s svc -w", f"{KEYCHAIN} find-" "internet-password -gs host",
+                        f"{KEYCHAIN} dump-" "keychain", "op read op://Vault/item/password", "op item get Stripe --reveal",
+                        "op item get Stripe --format json", "op inject -i tpl.env", "op document get cert"):
+            with self.subTest(command=command):
+                out = reply({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}, M)
+                self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_tools_that_consume_secrets_are_fine(self):
+        for command in ("op run --env-file=.env -- npm start", f"{KEYCHAIN} find-" "generic-password -s svc", "op item list"):
+            with self.subTest(command=command):
+                out = reply({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}, M)
+                self.assertNotEqual((out or {}).get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
 
 
 if __name__ == "__main__":

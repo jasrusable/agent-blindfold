@@ -114,7 +114,8 @@ Other commands:
   "disabled_rules": [],
   "guard_placeholders": true,
   "guard_known_values": true,
-  "wrap_claude_bash": true
+  "wrap_claude_bash": true,
+  "blocked_commands": ["\\bop\\s+read\\b"]
 }
 ```
 
@@ -122,6 +123,11 @@ Other commands:
   are your real secret files under `~`, `~/projects/*` and `~/.config/*`, never
   committed templates. To opt out of the defaults, set
   `"use_default_known_secret_files": false`.
+- **Blocked commands:** some commands print a secret with nothing around it that
+  marks it as one: macOS Keychain reads that print the password (`-w`/`-g`), a
+  Keychain dump, `op read`, `op item get --reveal`. Masking can't catch those,
+  so they're refused by default. `op run` and other tools that consume a secret
+  themselves are fine.
 - **Weak values** like `DB_PASSWORD=postgres` aren't treated as known secrets,
   since they'd match ordinary text everywhere. They are still masked where
   they're assigned to a secret name.

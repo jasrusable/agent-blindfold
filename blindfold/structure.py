@@ -1,5 +1,7 @@
 """Walking an agent's JSON values without changing their shape."""
 
+import base64
+import binascii
 import re
 import sys
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -7,10 +9,28 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .mask import Finding, Masker
 
 # Image payloads: masking base64 can only corrupt the image. A string under one
-# of these keys is skipped only if it is a base64 or data: blob; anything else
+# of these keys is skipped only if it is base64 that decodes to binary (an
+# image, a PDF). Base64 that decodes to text (an encoded .env) and anything else
 # there (a presigned URL, document text) is masked like any other string.
 SKIP_KEYS = frozenset({"base64", "image", "imageData", "data_uri"})
-_BLOB = re.compile(r"^(?:data:[^,\s]{0,100},)?[A-Za-z0-9+/=_\s-]{64,}$")
+_BLOB = re.compile(r"^(?:data:[^,\s]{0,100},)?([A-Za-z0-9+/=_\s-]{64,})$")
+
+
+def is_binary_blob(value: str) -> bool:
+    match = _BLOB.match(value)
+    if not match:
+        return False
+    sample = re.sub(r"\s", "", match.group(1))[:4096]
+    sample = sample[: len(sample) - len(sample) % 4]
+    try:
+        decoded = base64.b64decode(sample.replace("-", "+").replace("_", "/"), validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    try:
+        decoded.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return b"\x00" in decoded
 # MCP media blocks carry their payload under `data`.
 _MEDIA_TYPES = frozenset({"image", "audio", "document"})
 # Schema keys look like identifiers; anything else may itself be a value.
@@ -34,7 +54,7 @@ def deep_map(value: Any, fn: Callable[[str], str], map_keys: bool = True) -> Any
     stack: List[Tuple[Any, Any, Any, Optional[str], bool]] = [(value, root, 0, None, False)]
     while stack:
         source, target, slot, key, in_media = stack.pop()
-        if isinstance(source, str) and (key in SKIP_KEYS or (in_media and key == "data")) and _BLOB.match(source):
+        if isinstance(source, str) and (key in SKIP_KEYS or (in_media and key == "data")) and is_binary_blob(source):
             target[slot] = source
         elif isinstance(source, str):
             target[slot] = fn(source)
