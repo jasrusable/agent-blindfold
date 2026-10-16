@@ -138,26 +138,18 @@ def _only_reads(command: str, name: str, piped_on: bool) -> bool:
 
 def runs_file(later: List[Tuple[str, str]], path: str) -> bool:
     """Whether a later part may run the file at path: anything that names it
-    except a plain read (wc -l < x, cat x, git add x), also inside $(…) when
-    the outer command only prints (echo, printf) or reads."""
+    except a plain read (wc -l < x, cat x, git add x). Inside a substitution
+    its contents can end up anywhere (eval, printf -v, a pipe), so any
+    substitution that names it counts as running it."""
     name = path.rsplit("/", 1)[-1]
     if not name:
         return True
     for part, separator in later:
         if name not in part:
             continue
-        outer = part
-        for match in _SUBSTITUTION.finditer(part):
-            inner = match.group(1) if match.group(1) is not None else match.group(2)
-            outer = outer.replace(match.group(0), "")
-            if name not in inner:
-                continue
-            outer_verb, _ = _verb(first_line(part))
-            outer_rest = _SUBSTITUTION.sub("", first_line(part))
-            printed_safely = outer_verb in _READERS | {"echo", "printf"} and separator != "|" and not re.search(r"[<>]", outer_rest)
-            if not _only_reads(inner.strip(), name, "|" in inner) or not printed_safely:
-                return True
-        if name in outer and not _only_reads(first_line(outer), name, separator == "|"):
+        if any(name in match.group(0) for match in _SUBSTITUTION.finditer(part)) or "$(" in part or "`" in part:
+            return True
+        if not _only_reads(first_line(part), name, separator == "|"):
             return True
     return False
 

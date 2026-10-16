@@ -129,7 +129,7 @@ class SelfGuard(unittest.TestCase):
         self.assertTrue(self.reason({"command": f"cd {install} && cd /tmp && rm -rf scratch"}))
 
     def test_a_note_naming_a_path_then_a_check_that_reads_it_is_fine(self):
-        command = f"cat >> notes.md <<'EOF'\nUpdate: git -C {self.install} pull\nEOF\necho \"lines: $(wc -l < notes.md)\""
+        command = f"cat >> notes.md <<'EOF'\nUpdate: git -C {self.install} pull\nEOF\nwc -l < notes.md"
         self.assertIsNone(self.reason({"command": command}))
         written_then_run = f"cat > x.sh <<'EOF'\nrm -rf {self.install}\nEOF\nbash x.sh"
         self.assertTrue(self.reason({"command": written_then_run}))

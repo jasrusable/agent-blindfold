@@ -61,10 +61,11 @@ class Parts(unittest.TestCase):
                       "cp x.sh /tmp/y && /tmp/y", "chmod +x x.sh", "mv x.sh run", "xargs -a x.sh rm",
                       "cat x.sh > /tmp/y.sh", 'eval "$(cat x.sh)"', 'sh -c "$(cat x.sh)"', "PAGER=x.sh git log",
                       "git -c core.pager=x.sh log", "cat x.sh 2>/tmp/y", "FOO=1 cat x.sh",
-                      'echo "$(cat x.sh)" | sh', 'printf %s "$(cat x.sh)" > y.sh'):
+                      'echo "$(cat x.sh)" | sh', 'printf %s "$(cat x.sh)" > y.sh', 'printf -v X "$(cat x.sh)"',
+                      'echo "lines: $(wc -l < x.sh)"'):
             self.assertTrue(runs(later), later)
         for later in ("wc -l < x.sh", "cat x.sh", "git add x.sh", "echo done", "bash y.sh",
-                      'echo "lines: $(wc -l < x.sh)"', "grep -c foo x.sh", "ls -la x.sh"):
+                      "grep -c foo x.sh", "ls -la x.sh"):
             self.assertFalse(runs(later), later)
 
     def test_heads_and_write_targets(self):
@@ -95,8 +96,8 @@ class MentionsAreNotUses(unittest.TestCase):
         self.assertTrue(denied(f"cat > x.py <<'EOF'\n{OP} read op://V/i/f\nEOF\npython3 x.py"))
         self.assertTrue(denied(f"cat > x.sh <<'EOF'\n{OP} read op://V/i/f\nEOF\necho $(sh x.sh)"))
 
-    def test_a_note_followed_by_a_check_that_reads_it_is_fine(self):
-        self.assertFalse(denied(f"cat >> notes.md <<'EOF'\nNever run `{OP} read op://V/i/f`.\nEOF\necho \"lines: $(wc -l < notes.md)\""))
+    def test_a_note_followed_by_a_plain_read_of_it_is_fine(self):
+        self.assertFalse(denied(f"cat >> notes.md <<'EOF'\nNever run `{OP} read op://V/i/f`.\nEOF\nwc -l < notes.md"))
         self.assertTrue(denied(f'git commit -m "use `{OP} read op://V/i/f`"'))
 
     def test_an_example_placeholder_may_go_into_docs_but_not_into_code_or_config(self):
