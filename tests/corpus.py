@@ -299,4 +299,7 @@ MUST_MASK += [
     # A value that only looks like a literal: no quote or comma, so a secret.
     ("DB_PASSWORD=(hunter2x)", "(hunter2x)"),
     ("API_KEYS=[k8sL0ngR4nd0mT0k3nV4lu3Abc123xyz]", "k8sL0ngR4nd0mT0k3nV4lu3Abc123xyz"),
+    # A literal is judged by its items: a credential-looking one is still masked.
+    ('API_KEYS = ["k8sL0ngR4nd0mT0k3nV4lu3Abc123xyz", "x"]', "k8sL0ngR4nd0mT0k3nV4lu3Abc123xyz"),
+    ("ADMIN_PASSWORDS = ('Tr0ub4dor&3xq',)", "Tr0ub4dor&3xq"),
 ]

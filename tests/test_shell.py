@@ -36,6 +36,13 @@ class Parts(unittest.TestCase):
     def test_an_unterminated_heredoc_keeps_the_rest_with_it(self):
         self.assertEqual(len(shell.parts("python3 - <<EOF\nimport os\nos.remove('x')")), 1)
 
+    def test_substitution_in_a_heredoc_body_runs_only_without_a_quoted_delimiter(self):
+        self.assertTrue(shell.runs_substitution("cat > a <<EOF\n$(x)\nEOF"))
+        self.assertTrue(shell.runs_substitution("cat > a <<-EOF\n\t`x`\n\tEOF"))
+        self.assertFalse(shell.runs_substitution("cat > a <<'EOF'\n$(x)\nEOF"))
+        self.assertFalse(shell.runs_substitution('cat > a <<"EOF"\n`x`\nEOF'))
+        self.assertTrue(shell.runs_substitution("echo $(x) > a"))
+
     def test_heads_and_write_targets(self):
         self.assertEqual(shell.head("A=1 B=2 /usr/bin/env python3 x"), "env")
         self.assertEqual(shell.write_targets("cat > a.txt 2>/dev/null"), ["a.txt"])
@@ -53,6 +60,14 @@ class MentionsAreNotUses(unittest.TestCase):
         self.assertTrue(denied(f"bash <<'EOF'\n{OP} read op://V/i/f\nEOF"))
         self.assertTrue(denied(f"cat <<EOF | sh\n{OP} read op://V/i/f\nEOF"))
         self.assertTrue(denied(f"cat <<EOF\n{OP} read op://V/i/f\nEOF"))
+        # An unquoted heredoc expands $(…) and `…` in its body, even when saved to a file.
+        self.assertTrue(denied(f"cat > notes.md <<EOF\nkey: $({OP} read op://V/i/f)\nEOF"))
+        self.assertTrue(denied(f"tee notes.md <<EOF\nkey: `{OP} read op://V/i/f`\nEOF"))
+        self.assertFalse(denied(f"cat > notes.md <<'EOF'\nkey: $({OP} read op://V/i/f)\nEOF"))
+        # Saved, then run; or written to a device, not a file.
+        self.assertTrue(denied(f"cat > x.sh <<'EOF'\n{OP} read op://V/i/f\nEOF\nbash x.sh"))
+        self.assertTrue(denied(f"cat > /dev/stdout <<'EOF'\n{OP} read op://V/i/f\nEOF"))
+        self.assertTrue(denied(f"tee x.md <<'EOF' | bash\n{OP} read op://V/i/f\nEOF"))
         self.assertTrue(denied(f'git commit -m "use `{OP} read op://V/i/f`"'))
 
     def test_an_example_placeholder_may_go_into_docs_but_not_into_code_or_config(self):

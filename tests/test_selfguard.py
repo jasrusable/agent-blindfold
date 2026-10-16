@@ -57,6 +57,17 @@ class SelfGuard(unittest.TestCase):
             kept = handle.read().replace('"allow": []', '"allow": ["Read"]')
         self.assertIsNone(self.reason({"file_path": self.settings, "content": kept}))
 
+    def test_the_hook_off_setting_is_refused_in_any_settings_file_and_any_shell_write(self):
+        key = "disable" + "AllHooks"
+        for path in (f"{self.root}/x/.claude/managed-settings.json", f"{self.root}/Settings.JSON", f"{self.root}/p/.claude/x.json"):
+            with self.subTest(path=path):
+                self.assertTrue(self.reason({"file_path": path, "content": f'{{"{key.lower()}": true}}'}))
+        self.assertIsNone(self.reason({"file_path": f"{self.root}/notes.md", "content": f"Never set {key}."}))
+        self.assertTrue(self.reason({"command": f"jq '.{key} = true' a.json > b.json"}))
+        self.assertTrue(self.reason({"command": f"python3 -c 'print(\"{key}\")'"}))
+        self.assertIsNone(self.reason({"command": f"cat >> notes.md <<'EOF'\nNever set {key}.\nEOF"}))
+        self.assertIsNone(self.reason({"command": f"grep -rn {key} ."}))
+
     def test_turning_hooks_off_is_refused_anywhere(self):
         self.assertTrue(self.reason({"file_path": f"{self.root}/proj/.claude/settings.json", "content": '{"disableAllHooks": true}'}))
         key = "disable" + "AllHooks"
@@ -110,10 +121,29 @@ class SelfGuard(unittest.TestCase):
             f"python3 - <<'EOF'\nopen('{install}/x', 'w').write('')\nEOF",
             f"node -e \"require('fs').rmSync('{install}', {{recursive: true}})\"",
             f"cd {install}; rm -rf blindfold", f"cd /tmp && cd {install} && git reset --hard",
+            f"cat >> notes.md <<EOF\n$(rm -rf {install})\nEOF",
         ):
             with self.subTest(command=command[:40]):
                 self.assertTrue(self.reason({"command": command}))
-        self.assertIsNone(self.reason({"command": f"cd {install} && cd /tmp && rm -rf scratch"}))
+        # Deny by default: a command that names a protected path may only read or write notes elsewhere.
+        self.assertTrue(self.reason({"command": f"cd {install} && cd /tmp && rm -rf scratch"}))
+
+    def test_indirection_and_relative_paths_are_followed(self):
+        install, rel = self.install, self.install[len(os.path.expanduser("~")) + 1 :]
+        for command, cwd in (
+            (f"cd $HOME/{rel} && rm -rf blindfold", None),
+            (f"cd ${{HOME}}/{rel}; git pull", None),
+            (f"cd {os.path.basename(install)} && rm x", self.root),
+            ("cd .. && cd install && rm x", os.path.join(install, "blindfold")),
+            ("echo x > notes.md", install),
+            (f"X={install}; rm -rf $X", None),
+            (f"echo {install} | sh", None),
+            (f"cat > /dev/stdout <<'EOF'\n{install}\nEOF", None),
+            (f"echo hi > >(tee {install}/x)", None),
+        ):
+            with self.subTest(command=command[:40]):
+                self.assertTrue(self.reason({"command": command}, cwd=cwd))
+        self.assertIsNone(self.reason({"command": "cd build && make"}, cwd=self.root))
 
     def test_a_command_run_inside_a_protected_path_is_judged_by_its_cwd(self):
         self.assertTrue(self.reason({"command": "git pull"}, cwd=self.install))

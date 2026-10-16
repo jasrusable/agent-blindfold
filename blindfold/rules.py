@@ -110,6 +110,7 @@ _ATTRIBUTE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*
 # Code: a call, type, arrow function, generic, object or array literal.
 _CODE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.]*\(|^[(\[{]|=>|<|\bawait\b|\bnew [A-Z]|\btypeof\b")
 _SEQUENCE = re.compile(r"^[(\[]\s*(?:[\"'(\[]|[A-Za-z_]\w*\s*,)")
+_QUOTED_ITEMS = re.compile(r"\"((?:[^\"\\]|\\.)*)\"|'([^']*)'")
 _IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$")
 # A slug, word or path: letters and separators only, no digits.
 _SLUG = re.compile(r"^/?[A-Za-z]+(?:[-_./:][A-Za-z]+)*/?$")
@@ -128,7 +129,7 @@ def is_placeholder(value: str) -> bool:
     """Whether a value found next to a secret-looking name is clearly not a secret."""
     stripped = value.strip()
     # Prose punctuation after a stand-in word ("--password value, …") isn't part of it.
-    return len(stripped) < 4 or bool(PLACEHOLDER_VALUE.match(stripped)) or bool(PLACEHOLDER_VALUE.match(stripped.rstrip(".,;:!?")))
+    return len(stripped) < 4 or bool(PLACEHOLDER_VALUE.match(stripped)) or bool(PLACEHOLDER_VALUE.match(stripped.rstrip(".,;:")))
 
 
 def is_code_line(line: str) -> bool:
@@ -165,10 +166,12 @@ def is_secretish(value: str, context: str) -> bool:
     if is_placeholder(stripped):
         return False
     if context == "strong":
-        # A call, an attribute reference (settings.DB_PASSWORD) or a list or
-        # tuple literal (RESULT_KEYS = ("a", "b")) is code. A secret inside a
-        # literal is still caught by the vendor and entropy rules.
-        return not (_CALL.match(stripped) or _ATTRIBUTE.match(stripped) or _SEQUENCE.match(stripped))
+        # A call or an attribute reference (settings.DB_PASSWORD) is code. A
+        # list or tuple literal (RESULT_KEYS = ("a", "b")) is judged by its
+        # quoted items, each as a quoted value.
+        if _SEQUENCE.match(stripped):
+            return any(is_secretish(m.group(1) or m.group(2) or "", "quoted") for m in _QUOTED_ITEMS.finditer(stripped))
+        return not (_CALL.match(stripped) or _ATTRIBUTE.match(stripped))
     if _CODE.search(stripped) or _VERSION.match(stripped):
         return False
     if _COMMAND.match(stripped) and _COMMAND_MARKER.search(stripped):

@@ -17,7 +17,12 @@ DATA_COMMANDS = ("cat", "tee", "echo", "printf")
 def parts(command: str) -> List[str]:
     """The command's parts, split at separators outside quotes. A here-document's
     body goes with the part that opened it."""
-    found: List[str] = []
+    return [part for part, _ in split(command)]
+
+
+def split(command: str) -> List[Tuple[str, str]]:
+    """(part, the separator after it) pairs; see parts()."""
+    found: List[List[str]] = []
     current: List[str] = []
     pending: List[Tuple[bool, str, int]] = []
     at, quote = 0, ""
@@ -48,24 +53,24 @@ def parts(command: str) -> List[str]:
             at += 1
             continue
         if char == "\n" and pending:
-            found.append("".join(current))
+            found.append(["".join(current), "\n"])
             current = []
             at = _consume_bodies(command, at + 1, pending, found)
             pending = []
             continue
         separator = next((s for s in _SEPARATORS if command.startswith(s, at)), None)
         if separator:
-            found.append("".join(current))
+            found.append(["".join(current), separator])
             current = []
             at += len(separator)
             continue
         current.append(char)
         at += 1
-    found.append("".join(current))
-    return [part for part in (p.strip() for p in found) if part]
+    found.append(["".join(current), ""])
+    return [(part.strip(), separator) for part, separator in found if part.strip()]
 
 
-def _consume_bodies(command: str, at: int, pending: List[Tuple[bool, str, int]], found: List[str]) -> int:
+def _consume_bodies(command: str, at: int, pending: List[Tuple[bool, str, int]], found: List[List[str]]) -> int:
     """Append each pending here-document body (to its delimiter line) to the part that opened it."""
     for strip_tabs, delimiter, opener in pending:
         body = []
@@ -76,7 +81,7 @@ def _consume_bodies(command: str, at: int, pending: List[Tuple[bool, str, int]],
             body.append("\n" + line)
             if (line.lstrip("\t") if strip_tabs else line) == delimiter:
                 break
-        found[opener] = found[opener].rstrip(" \t") + "".join(body)
+        found[opener][0] = found[opener][0].rstrip(" \t") + "".join(body)
     return at
 
 
@@ -92,16 +97,45 @@ def first_line(part: str) -> str:
     return part.split("\n", 1)[0]
 
 
+def runs_substitution(part: str) -> bool:
+    """Whether a part runs $(…) or `…`: on its command line, or in a
+    here-document body whose delimiter isn't quoted (<<EOF expands; <<'EOF'
+    doesn't)."""
+    line, _, body = part.partition("\n")
+    heredoc = _HEREDOC.search(line)
+    expanding = heredoc is None or not heredoc.group(2)
+    return any(mark in line or (expanding and mark in body) for mark in ("$(", "`", "<(", ">("))
+
+
+def is_plain_file(target: str) -> bool:
+    """A file on disk, not a device, descriptor or expansion that could be a
+    terminal, another process or anywhere at all."""
+    return not target.startswith(("/dev/", "/proc/", "&")) and not any(mark in target for mark in ("$", "`", "(", "*", "?"))
+
+
 def writes_heredoc_to_file(part: str) -> bool:
-    """cat or tee saving a here-document to a file: its body is data, not
-    commands. Piped on (`cat <<EOF | sh`) it may be run, so it isn't."""
+    """cat or tee saving a here-document to plain files, running nothing: its
+    body is data, not commands."""
     line = first_line(part)
-    return head(line) in ("cat", "tee") and bool(_HEREDOC.search(line)) and bool(write_targets(part))
+    targets = write_targets(part)
+    return (
+        head(line) in ("cat", "tee") and bool(_HEREDOC.search(line)) and bool(targets)
+        and all(is_plain_file(t) for t in targets) and not runs_substitution(part)
+    )
 
 
 def strip_data_heredocs(command: str) -> str:
-    """The command without the bodies of here-documents saved to files."""
-    return "\n".join(first_line(part) if writes_heredoc_to_file(part) else part for part in parts(command))
+    """The command without the bodies of here-documents saved to files. Not
+    when piped on (`cat <<EOF | sh`), or when a later part names the file it
+    wrote (`cat > x.sh <<EOF … ; bash x.sh`): then the body may be run."""
+    pairs = split(command)
+    kept = []
+    for index, (part, separator) in enumerate(pairs):
+        later = " ".join(p for p, _ in pairs[index + 1 :])
+        names = [t.rsplit("/", 1)[-1] for t in write_targets(part)]
+        data = writes_heredoc_to_file(part) and separator != "|" and not any(n and n in later for n in names)
+        kept.append(first_line(part) if data else part)
+    return "\n".join(kept)
 
 
 def write_targets(part: str) -> List[str]:

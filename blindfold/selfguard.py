@@ -30,7 +30,9 @@ DISABLE_HOOKS = "disable" + "AllHooks"
 _PATH_KEYS = ("file_path", "filePath", "path", "target_file", "targetFile", "notebook_path")
 _OLD_TEXT_KEYS = ("old_string", "oldString", "old_str")
 _HOOK_COMMAND = re.compile(r"[^\s\"']*blindfold(?: [^\s\"']+){0,4} hook")
-_SETTINGS_FILE = re.compile(r"(?:^|/)settings(?:\.local)?\.json$")
+# Agent settings files, wherever they are: settings.json, settings.local.json,
+# managed-settings.json, anything under a .claude directory.
+_SETTINGS_FILE = re.compile(r"settings[^/]*\.json$|(?:^|/)\.claude/", re.IGNORECASE)
 
 # Parts of a shell command that only read: allowed even on a protected path.
 _READ_ONLY = re.compile(
@@ -40,8 +42,6 @@ _READ_ONLY = re.compile(
     r"|\S*blindfold\s+(?:doctor|scan|hook|selftest|install(?!.*--apply))(?:\s.*)?",
     re.DOTALL,
 )
-# Commands that act on input from an earlier part: `find <path> | xargs rm`.
-_CONSUMERS = ("xargs", "parallel", "sh", "bash", "zsh", "while", "source", ".")
 _QUOTED = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
 _HARMLESS_REDIRECT = re.compile(r"\d?>&\d|\d?>\s*/dev/null")
 
@@ -94,38 +94,53 @@ def is_read_only_command(command: str) -> bool:
     return all(_is_read_only_part(part) for part in shell.parts(command))
 
 
-def _writes_only_elsewhere(part: str, roots: List[str]) -> bool:
-    """A cat/tee/echo/printf whose output goes to files outside roots: what it
-    says (a heredoc of notes naming a path) is data, not use."""
+def _data_targets(part: str, here: Optional[str]) -> Optional[List[str]]:
+    """The files a plain cat/tee/echo/printf writes, resolved against here, or
+    None if the part is anything else: what such a part says (a heredoc of
+    notes naming a path) is data, not use."""
     line = shell.first_line(part)
-    if shell.head(line) not in shell.DATA_COMMANDS or "`" in line or "$(" in line:
-        return False
+    if shell.head(line) not in shell.DATA_COMMANDS or shell.runs_substitution(part):
+        return None
     targets = shell.write_targets(part)
-    return bool(targets) and not any(_named(target, roots) or _inside(target, roots) for target in targets)
+    if not targets or not all(shell.is_plain_file(t) for t in targets):
+        return None
+    base = here or os.getcwd()
+    return [os.path.join(base, os.path.expanduser(t)) for t in targets]
+
+
+def _cd(line: str, here: Optional[str], protected: List[str]) -> Optional[str]:
+    """The directory after `cd …`, or None if it can't be known. A target that
+    names a protected path counts as inside it, however it's spelled."""
+    words = line.split()
+    target = os.path.expandvars(os.path.expanduser(words[1].strip("'\""))) if len(words) > 1 else os.path.expanduser("~")
+    if any(mark in target for mark in ("$", "`", "(")) or target == "-":
+        named = _named(line, protected)
+        return _resolve(named) if named else None
+    return os.path.normpath(os.path.join(here, target)) if here and not os.path.isabs(target) else os.path.abspath(target)
 
 
 def _command_reason(command: str, cwd: Optional[str], protected: List[str], settings: List[str]) -> Optional[str]:
+    """Deny by default: once a command names a protected path, or runs inside
+    one, every part must be read-only or a plain data write elsewhere."""
     guarded = protected + settings
-    inside = _inside(cwd, protected) if cwd else None
-    named_earlier: Optional[str] = None
+    names_protected = _named(command, protected)
+    here = cwd
     for part in shell.parts(command):
         line = shell.first_line(part)
-        if named_earlier and shell.head(line) in _CONSUMERS:
-            return f"it acts on {named_earlier} through {shell.head(line)}"
-        named_earlier = named_earlier or _named(part, protected)
         if shell.head(line) == "cd":
-            target = line.split(None, 1)[1].strip().strip("'\"") if len(line.split()) > 1 else "~"
-            inside = _inside(target, protected) if not target.startswith("$") else inside
+            here = _cd(line, here, protected)
             continue
         if _is_read_only_part(part):
             continue
-        if DISABLE_HOOKS in part and "settings" in part:
+        targets = _data_targets(part, here)
+        elsewhere = targets is not None and not any(_named(t, guarded) or _inside(t, guarded) for t in targets)
+        if DISABLE_HOOKS.lower() in part.lower() and not (elsewhere and not any(_SETTINGS_FILE.search(t) for t in targets or [])):
             return f"it sets {DISABLE_HOOKS}"
-        if _writes_only_elsewhere(part, guarded):
+        if elsewhere:
             continue
-        named = _named(part, protected)
-        if named or inside:
-            return f"it changes {named or inside}"
+        inside = _inside(here, protected) if here else None
+        if inside or names_protected:
+            return f"it changes {inside or names_protected}"
         if _named(part, settings):
             return "it may rewrite the agent settings; use the file-edit tool, which checks blindfold's hooks stay"
     return None
@@ -180,7 +195,7 @@ def reason(
         root = _inside(path, protected)
         if root:
             return f"it writes inside {root}"
-        if _SETTINGS_FILE.search(path) and any(DISABLE_HOOKS in text for text in strings(tool_input)):
+        if _SETTINGS_FILE.search(path) and any(DISABLE_HOOKS.lower() in text.lower() for text in strings(tool_input)):
             return f"it sets {DISABLE_HOOKS}"
         if _inside(path, settings) and _settings_change(tool_input, path):
             return "it changes blindfold's hooks in the agent settings"
