@@ -153,7 +153,9 @@ def runs_file(later: List[Tuple[str, str]], path: str) -> bool:
             if name not in inner:
                 continue
             outer_verb, _ = _verb(first_line(part))
-            if not _only_reads(inner.strip(), name, "|" in inner) or outer_verb not in _READERS | {"echo", "printf"}:
+            outer_rest = _SUBSTITUTION.sub("", first_line(part))
+            printed_safely = outer_verb in _READERS | {"echo", "printf"} and separator != "|" and not re.search(r"[<>]", outer_rest)
+            if not _only_reads(inner.strip(), name, "|" in inner) or not printed_safely:
                 return True
         if name in outer and not _only_reads(first_line(outer), name, separator == "|"):
             return True

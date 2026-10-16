@@ -60,7 +60,8 @@ class Parts(unittest.TestCase):
                       "echo $(sh x.sh)", "env FOO=1 bash x.sh", "cat x.sh | sh", "sh < x.sh", "sh<x.sh",
                       "cp x.sh /tmp/y && /tmp/y", "chmod +x x.sh", "mv x.sh run", "xargs -a x.sh rm",
                       "cat x.sh > /tmp/y.sh", 'eval "$(cat x.sh)"', 'sh -c "$(cat x.sh)"', "PAGER=x.sh git log",
-                      "git -c core.pager=x.sh log", "cat x.sh 2>/tmp/y", "FOO=1 cat x.sh"):
+                      "git -c core.pager=x.sh log", "cat x.sh 2>/tmp/y", "FOO=1 cat x.sh",
+                      'echo "$(cat x.sh)" | sh', 'printf %s "$(cat x.sh)" > y.sh'):
             self.assertTrue(runs(later), later)
         for later in ("wc -l < x.sh", "cat x.sh", "git add x.sh", "echo done", "bash y.sh",
                       'echo "lines: $(wc -l < x.sh)"', "grep -c foo x.sh", "ls -la x.sh"):
