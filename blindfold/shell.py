@@ -132,7 +132,7 @@ def _only_reads(command: str, name: str, piped_on: bool) -> bool:
     after `git`, so no -c or --exec-path)."""
     verb, words = _verb(command)
     reads = verb in _READERS or (verb == "git" and len(words) > 1 and words[1] in _GIT_READS)
-    rest = command.replace(f"< {name}", "").replace(f"<{name}", "")
+    rest = re.sub(r"<\s*[^\s<>|;&]*" + re.escape(name) + r"(?![\w.-])", "", command)
     return reads and not piped_on and not re.search(r"[<>]", rest)
 
 

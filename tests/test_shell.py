@@ -65,7 +65,8 @@ class Parts(unittest.TestCase):
                       'echo "lines: $(wc -l < x.sh)"'):
             self.assertTrue(runs(later), later)
         for later in ("wc -l < x.sh", "cat x.sh", "git add x.sh", "echo done", "bash y.sh",
-                      "grep -c foo x.sh", "ls -la x.sh"):
+                      "grep -c foo x.sh", "ls -la x.sh", "wc -l < /tmp/dir/x.sh",
+                      "cat ~/notes/x.sh", "wc -l </tmp/x.sh"):
             self.assertFalse(runs(later), later)
 
     def test_heads_and_write_targets(self):
