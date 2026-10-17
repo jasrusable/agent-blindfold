@@ -42,7 +42,9 @@ def _only_comments(command: str) -> bool:
 
 
 def wrap(command: str) -> str:
-    """The command made to exit 0, reporting a failure's code on stderr."""
-    if (command.startswith(_OPEN) and command.endswith(_CLOSE)) or _only_comments(command):
-        return command
-    return f"{_OPEN}{command}{_CLOSE}"
+    """The command made to exit 0, reporting a failure's code on stderr.
+
+    Always wrapped, even when it looks wrapped already: a command crafted to
+    look wrapped would otherwise run bare, and wrapping twice is harmless (the
+    inner report succeeds, so the outer one says nothing)."""
+    return command if _only_comments(command) else f"{_OPEN}{command}{_CLOSE}"

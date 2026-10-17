@@ -190,10 +190,10 @@ class SelfGuard(unittest.TestCase):
         for command in (
             f"ls -la {self.home_form}/bin", f"cat {config}/config.json", f"git -C {install} fetch",
             f"git -C {install} branch -a", f"git -C {install} config --get remote.origin.url", f"git -C {install} stash list",
-            f"git -C {install} tag", f"cp {install}/README.md /tmp/readme.md", f"rsync -a {install}/ /tmp/copy/",
+            f"git -C {install} tag", f"cp {install}/README.md /tmp/readme.md", f"git -C {install} log -p",
             f"find {install} -name '*.py' | wc -l", f"sed -n 1,5p {install}/x", f"diff {install}/x ./x",
             f"grep -rn foo {install} > /tmp/hits.txt", f"cat {settings}", f"jq .hooks {settings}",
-            f"cp {settings} /tmp/settings.bak", f"echo 'see {install}' | pbcopy", f"rm -rf /tmp/x  # not {install}",
+            f"cp {settings} /tmp/settings.bak", f"sed -n 1,5p {settings}", f"rm -rf /tmp/x  # not {install}",
             f"(cd {install} && ls); rm -rf scratch", f"( cd {install} ) && rm -rf scratch", f"for f in {install}/*.py; do wc -l $f; done",
             f"if [ -d {install} ]; then echo yes; fi", f"sudo ls {install}", f"stat {self.link}",
         ):
@@ -225,6 +225,78 @@ class SelfGuard(unittest.TestCase):
         for scoped in ("(cd /tmp); rm -rf blindfold", "( cd /tmp ) && rm -rf blindfold", "(cd /tmp && ls)\nrm -rf blindfold"):
             with self.subTest(command=scoped):
                 self.assertTrue(self.reason({"command": scoped}, cwd=install))
+
+    def refused(self, *commands, cwd=None):
+        for command in commands:
+            with self.subTest(command=command[:70]):
+                self.assertTrue(self.reason({"command": command}, cwd=cwd or self.root))
+
+    def test_review_1_a_heredoc_ends_where_the_shell_ends_it(self):
+        install = self.install
+        # bash ends the body at `EOF)` and runs what follows; zsh doesn't. Never inlined.
+        self.refused(
+            f"gh issue create --body \"$(cat <<'EOF'\nx\nEOF)\"; rm -rf {install}\nEOF\n)\"",
+            f"git commit -m \"$(cat <<'EOF'\nx\nEOF \nrm -rf {install}\nEOF\n)\"",
+            f"echo \"$(cat <<'EOF'\nnote {install}\nEOF\n; rm x)\"",
+        )
+
+    def test_review_2_variables_that_point_at_a_protected_path(self):
+        install, parent = self.install, os.path.dirname(self.install)
+        self.refused(
+            f"GIT_DIR={install}/.git git pull", f"GIT_WORK_TREE={install} git -C /tmp/r checkout .",
+            f"export GIT_DIR={install}/.git; git pull", f"env GIT_DIR={install}/.git git reset --hard",
+            f"GIT_PAGER=x git -C {install} log", f"GIT_EXTERNAL_DIFF=x git -C {install} diff",
+            f"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=x git -C {install} log",
+            f"export GIT_PAGER=x; git -C {install} log", f"PIP_TARGET={install} pip install x",
+            f"X={install} make", f"HOME={parent}; cd; rm -rf install", f"CDPATH={parent} cd install && touch x",
+            f"env -C {install} touch x", f"sudo -D {install} touch x", f"env -S 'rm -rf {install}'",
+            f"sudo -u cat rm -rf {install}", f"cd {parent} && GIT_DIR=install/.git git pull",
+        )
+
+    def test_review_3_attached_option_values(self):
+        install, parent = self.install, os.path.dirname(self.install)
+        self.refused(
+            f"curl -o{install}/x u", f"sort -o{install}/x y", f"tar -xf a.tgz -C{install}", f"cp -t{install} x",
+            f"mv --target-directory={install} x", f"gcc -o{install}/x a.c", f"cd {parent} && curl -oinstall/x u",
+            f"cd {parent} && cp -tinstall x",
+        )
+
+    def test_review_4_sed_scripts_and_git_options_that_write_or_run(self):
+        install = self.install
+        self.refused(
+            f"sed 's/a/b/w {install}/x' f", f"sed -n '1w {install}/x' f", f"sed -e p -e 'w {install}/x' f",
+            f"sed --expression='w {install}/x' f", f"sed -ne 'w {install}/x' f", f"sed 'e touch x' {install}/y",
+            f"sed -f script {install}/x", f"sed -I '' s/a/b/ {install}/x",
+            f"git -C /tmp/r diff --output={install}/x", f"git -C {install} log --output=/tmp/x",
+            f"git -C {install} fetch --upload-pack='touch x' u", f"git -C {install} grep -Ovim x",
+            f"git -C {install} diff --ext-diff", f"git -C {install} log -c",
+            f"rg --pre ./x foo {install}", f"file -C -m {install}/magic",
+        )
+        for command in (f"sed -n 1,5p {install}/x", f"sed 's/a/b/' {install}/x", f"git -C {install} log -p"):
+            with self.subTest(command=command):
+                self.assertIsNone(self.reason({"command": command}, cwd=self.root))
+
+    def test_review_5_command_strings_and_stdin_that_name_a_path(self):
+        install = self.install
+        self.refused(
+            f'watch "rm -rf {install}"', f'su -c "rm -rf {install}"', f'ssh host "rm -rf {install}"',
+            f'script -q -c "rm -rf {install}" /dev/null', f'flock /tmp/l -c "rm -rf {install}"',
+            f'timeout 5 sh -c "rm -rf {install}"', f'nice -n 5 bash -c "touch {install}/x"',
+            f"trap 'rm -rf {install}' EXIT", f'echo "rm -rf {install}" | su',
+            f"sqlite3 db <<'EOF'\n.backup {install}/x\nEOF", f"rsync -a {install}/ /tmp/copy/",
+            f"echo 'see {install}' | pbcopy", f"gh repo clone o/r {install}",
+            f"git commit -F {install}/msg",
+        )
+
+    def test_review_splitter_gaps_are_closed(self):
+        install = self.install
+        self.refused(
+            f"cat x & rm -rf {install}",
+            f"echo hi # don't\nrm -rf {install}\necho 'x'",
+            f"echo $'x\\' y' ; rm -rf {install} ; echo 'z'",
+            f"cat > /tmp/n <<E\"OF\"\nnote\nEOF\nrm -rf {install}",
+            f"cat <<<x\nrm -rf {install}\nx",
+        )
 
     def test_the_hook_denies_with_a_reason_that_hands_the_change_to_the_user(self):
         from unittest import mock

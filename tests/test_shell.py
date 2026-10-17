@@ -105,6 +105,25 @@ class Parts(unittest.TestCase):
         for kept in ("echo \"$(cat <<EOF\n$(x)\nEOF\n)\"", "echo \"title: $(cat <<'EOF'\nx\nEOF\n)\""):
             self.assertEqual(shell.inline_literal_heredocs(kept), kept)
 
+    def test_a_heredoc_body_is_inlined_only_where_every_shell_ends_it_the_same_way(self):
+        for kept in (
+            "echo \"$(cat <<'EOF'\nx\nEOF)\"; touch y\nEOF\n)\"",  # bash ends at `EOF)`, zsh doesn't
+            "echo \"$(cat <<'EOF'\nx\nEOF \ny\nEOF\n)\"",
+            "echo \"$(cat <<'EOF'\nx\nEOF\n; touch y)\"",
+            "echo '$(cat <<\"EOF\"\nx\nEOF\n)'",
+            "cat <<'X'\n$(cat <<'EOF'\nx\nEOF\n)\nX",
+        ):
+            self.assertEqual(shell.inline_literal_heredocs(kept), kept, kept)
+        self.assertEqual(shell.inline_literal_heredocs("a $(cat <<-'EOF'\n\tx\n\tEOF\n) b"), "a 'x' b")
+
+    def test_comments_ansi_quotes_here_strings_and_a_lone_ampersand(self):
+        self.assertEqual(shell.parts("echo hi # don't\nls"), ["echo hi", "ls"])
+        self.assertEqual(shell.parts("echo $'a\\'b'; ls"), ["echo $'a\\'b'", "ls"])
+        self.assertEqual(shell.parts("cat <<<x\nls"), ["cat <<<x", "ls"])
+        self.assertEqual(shell.parts("sleep 1 & ls 2>&1 &> f"), ["sleep 1", "ls 2>&1 &> f"])
+        self.assertEqual(shell.parts("cat <<E\"OF\"\nx\nEOF"), ["cat <<E\"OF\"", "x", "EOF"])
+        self.assertIsNone(shell.words("echo a\nb"))
+
     def test_heads_and_write_targets(self):
         self.assertEqual(shell.head("A=1 B=2 /usr/bin/env python3 x"), "env")
         self.assertEqual(shell.write_targets("cat > a.txt 2>/dev/null"), ["a.txt"])

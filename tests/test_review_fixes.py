@@ -73,11 +73,22 @@ class BashWrapper(unittest.TestCase):
             self.assertNotIn("trap", wrapped.replace(command, ""), command)
             self.assertTrue(wrapped.startswith("(\n"), command)
 
-    def test_idempotent_and_skips_only_comment_only_commands(self):
-        once = bash.wrap("ls")
-        self.assertEqual(bash.wrap(once), once)
+    def test_skips_only_comment_only_commands(self):
         self.assertEqual(bash.wrap("   "), "   ")
         self.assertEqual(bash.wrap("# note\n\n"), "# note\n\n")
+
+    def test_a_command_that_looks_wrapped_is_wrapped_again(self):
+        once = bash.wrap("true")
+        close = once[len("(\ntrue"):]
+        crafted = "(\ntrue\n\n)\nexit 3\n(\ntrue" + close
+        self.assertNotEqual(bash.wrap(crafted), crafted)
+        for shell in ("/bin/zsh", "/bin/bash"):
+            for command, code in ((crafted, 3), (bash.wrap("exit 4"), 4)):
+                with self.subTest(shell=shell, command=command[:30]):
+                    proc = self.run_wrapped(command, shell)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertEqual(proc.stderr.count(bash.MARKER), 1, proc.stderr)
+                    self.assertIn(f"{bash.MARKER} {code};", proc.stderr)
 
     def test_commands_that_could_end_the_shell_are_still_reported(self):
         for shell in ("/bin/zsh", "/bin/bash"):

@@ -78,29 +78,38 @@ Before each call, blindfold refuses one that would change blindfold itself:
   `settings.local.json`, or a full write that drops them. Other settings edits
   are fine.
 - **Turning hooks off:** `disableAllHooks` written into a settings file, by any tool.
-- **Shell commands that write to a protected path:** a redirection into it;
-  `rm`, `mv`, `touch`, `chmod`, `chown`, `tee`, `truncate`, `sed -i`, an editor
-  or `patch` given a path there; `cp`, `ln`, `rsync` or `install` with it as the
-  destination; `dd of=`; `find … -delete`; a git command that changes a
-  repository there (`pull`, `checkout`, `reset`, `config` set, `remote add`, `-c`
-  anything); any other command given a path there as an argument (`pip install
-  -e`, `npm --prefix=`, `curl -o`, `tar -C`); anything but a read run inside it
-  (`cd` followed); running a file from it. Shell writes to the agent settings
-  file are refused the same way; the file-edit tools are checked precisely
-  instead.
+- **Shell commands that may write to a protected path.** Only known readers
+  (`ls`, `cat`, `grep`, `sed` with a plain script, `find` without
+  `-delete`/`-exec`, read-only git, `blindfold doctor`, …) may name one. Any
+  other command may not name one in any word, quoted or not, nor on its stdin
+  (a heredoc or a pipe), except a git or gh message (`-m`, `--body`, `--title`,
+  `-F` of a file elsewhere). `cp`, `ln`, `install` and `ditto` may read from
+  one; their destination and options may not name one.
+- **Paths it follows:** redirections (`>`, `2>`, `&>`, `exec >`), relative paths
+  after `cd`/`pushd`, attached option values (`-o<path>`, `--file=<path>`),
+  `$X` and globs whose literal start leads into a protected path, and anything
+  but a read run inside one. A git command that changes a repository there
+  (`pull`, `checkout`, `config` set, and any `-c`, `--output`, `--upload-pack`,
+  `--ext-diff`, `-O`) is refused.
+- **Variables and wrappers:** `X=<path>`, `export`, `env`, and `sudo`/`env`
+  options (`-D`, `-C`) may not point at a protected path; `GIT_*`, `PAGER` or
+  `EDITOR` set anywhere in the command makes git a writer; `HOME=` or `CDPATH=`
+  makes any mention of a protected path, or its folder name, refused.
 - **Code it can't follow that names one:** a shell, Python, Node, `xargs`,
-  `awk`, `find -exec`, a `$(…)` or backtick substitution, a heredoc run by a
-  shell, a file written and then run, a command it can't parse. These may not
-  even name a protected path.
+  `awk`, `find -exec`, `env -S`, a `$(…)` or backtick substitution, a heredoc
+  run by a shell, a file written and then run, a command it can't parse.
+- **Shell writes to the agent settings file** are refused the same way; the
+  file-edit tools are checked precisely instead.
 
-Reads are fine (`ls`, `cat`, `cp` from it, `git -C … log`, `remote -v`,
-`fetch`, `blindfold doctor`, …), and so is text that names a path: a heredoc
-saved to a file or printed, a quoted message or issue body (`--body "…"`,
-`-m "…"`, `"$(cat <<'EOF' … EOF)"`), any word with spaces. Commands are split
-and unquoted the way the shell does it (quotes, escapes, here-documents,
-comments), so a `|` inside a grep pattern or a path inside a heredoc of notes
-isn't mistaken for use. The same applies to the blocked commands: a heredoc
-saved to a file is data, while one piped into a shell is judged.
+Text that names a path is fine where it can only be text: a heredoc saved to a
+file or printed by a reader, a git or gh message, `"$(cat <<'EOF' … EOF)"`
+(inlined only where bash and zsh both end the body at the same line). Commands
+are split and unquoted the way the shell does it (quotes and `$'…'`, escapes,
+comments, here-documents and here-strings, `;`, `&`, `&&`, `||`, `|`), so a `|`
+inside a grep pattern or a path inside a heredoc of notes isn't mistaken for
+use, and anything the split can't settle is judged as code. The same applies
+to the blocked commands: a heredoc saved to a file is data, while one piped
+into a shell is judged.
 
 Changes to blindfold go through the user, who can type `! <command>`. Your
 development checkout is not protected; only the copy the hook runs from is.
