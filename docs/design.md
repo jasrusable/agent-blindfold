@@ -45,9 +45,15 @@ That would leave `cat .env; exit 1` or a crashing script that dumps its config
 unmasked. So blindfold rewrites each Bash command to exit 0 and report the real exit
 code on stderr as `[blindfold: exit code N; …]`, which sends its output down the
 success path that blindfold can mask.
-- A plain command runs in a `{ … }` group, so `cd` still carries over to the next call.
-- A command that could end the shell itself (`exit`, `exec`, `set -e`) runs in a
-  subshell, and `set -e` keeps working.
+- The command runs in a `( … )` subshell, so whatever ends it (`exit`, `exec`,
+  `set -e`, `${X:?}`, zsh's "no matches found") ends only the subshell, and
+  `set -e` keeps working.
+- No `trap`: Claude Code's worktree-isolation guard can't verify a trap's body,
+  so it refused every wrapped command in a worktree session.
+- The cost: a `cd` no longer carries over to the next call. Claude Code keeps
+  the working directory by running `pwd -P` in the parent shell after each
+  command, which a subshell's `cd` doesn't reach. `cd dir && cmd` in one call
+  works, and the session note tells the agent.
 - The status is never tested with `||`, which would silently disable `set -e`.
 - Your permission rules still match the rewritten command; the selftest checks
   this.
@@ -72,18 +78,38 @@ Before each call, blindfold refuses one that would change blindfold itself:
   `settings.local.json`, or a full write that drops them. Other settings edits
   are fine.
 - **Turning hooks off:** `disableAllHooks` written into a settings file, by any tool.
-- **Shell commands that use a protected path:** writing into it, running
-  inside it (`cd` included), feeding its files to `xargs`, a shell or a loop,
-  or running code (Python, Node, …) that names it. Read-only parts (`ls`,
-  `cat`, `grep`, `git log`, `blindfold doctor`, …) are fine, and so is text that
-  only mentions a path: a note or doc written with `cat`, `tee`, `echo` or
-  `printf` to a file elsewhere. Shell rewrites of the agent settings file are
-  refused; the file-edit tools are checked precisely instead.
+- **Shell commands that may write to a protected path.** Only known readers
+  (`ls`, `cat`, `grep`, `sed` with a plain script, `find` without
+  `-delete`/`-exec`, read-only git, `blindfold doctor`, …) may name one. Any
+  other command may not name one in any word, quoted or not, nor on its stdin
+  (a heredoc or a pipe), except a git or gh message (`-m`, `--body`, `--title`,
+  `-F` of a file elsewhere). `cp`, `ln`, `install` and `ditto` may read from
+  one; their destination and options may not name one.
+- **Paths it follows:** redirections (`>`, `2>`, `&>`, `exec >`), relative paths
+  after `cd`/`pushd`, attached option values (`-o<path>`, `--file=<path>`),
+  `$X` and globs whose literal start leads into a protected path, and anything
+  but a read run inside one. A git command that changes a repository there
+  (`pull`, `checkout`, `config` set, and any `-c`, `--output`, `--upload-pack`,
+  `--ext-diff`, `-O`) is refused.
+- **Variables and wrappers:** `X=<path>`, `export`, `env`, and `sudo`/`env`
+  options (`-D`, `-C`) may not point at a protected path; `GIT_*`, `PAGER` or
+  `EDITOR` set anywhere in the command makes git a writer; `HOME=` or `CDPATH=`
+  makes any mention of a protected path, or its folder name, refused.
+- **Code it can't follow that names one:** a shell, Python, Node, `xargs`,
+  `awk`, `find -exec`, `env -S`, a `$(…)` or backtick substitution, a heredoc
+  run by a shell, a file written and then run, a command it can't parse.
+- **Shell writes to the agent settings file** are refused the same way; the
+  file-edit tools are checked precisely instead.
 
-Commands are split the way the shell splits them (quotes, escapes,
-here-documents), so a `|` inside a grep pattern or a path inside a heredoc of
-notes isn't mistaken for use. The same applies to the blocked commands: a
-heredoc saved to a file is data, while one piped into a shell is judged.
+Text that names a path is fine where it can only be text: a heredoc saved to a
+file or printed by a reader, a git or gh message, `"$(cat <<'EOF' … EOF)"`
+(inlined only where bash and zsh both end the body at the same line). Commands
+are split and unquoted the way the shell does it (quotes and `$'…'`, escapes,
+comments, here-documents and here-strings, `;`, `&`, `&&`, `||`, `|`), so a `|`
+inside a grep pattern or a path inside a heredoc of notes isn't mistaken for
+use, and anything the split can't settle is judged as code. The same applies
+to the blocked commands: a heredoc saved to a file is data, while one piped
+into a shell is judged.
 
 Changes to blindfold go through the user, who can type `! <command>`. Your
 development checkout is not protected; only the copy the hook runs from is.

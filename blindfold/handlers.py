@@ -33,6 +33,7 @@ Placeholder: <blindfold kind=env:STRIPE_API_KEY len=107 id=3f9a1c>
 - len: the value's length. id: a keyed fingerprint, same value same id, not reversible.
 - <blindfold: output withheld ...> means the masker failed and hid everything. The tool did run; don't re-run it blindly.
 - "[blindfold: exit code N; reported as success so its output could be masked]" at the end of a command's output means the command FAILED with exit code N. Treat it as a failure.
+- In Claude Code each Bash command runs in a subshell, so a `cd` doesn't carry over to the next command. Use absolute paths, or `cd dir && …` within one command.
 
 Rules:
 0. You are the first line of defence, blindfold is the safety net: be cautious with anything that is or might be sensitive, work blind by default, and don't read secret files, dump env vars or print config unless the task needs it (prefer commands that report names, presence or lengths). Masking can miss things.
