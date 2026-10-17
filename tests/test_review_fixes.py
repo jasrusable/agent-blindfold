@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -58,15 +59,19 @@ class BashWrapper(unittest.TestCase):
                     else:
                         self.assertIn(f"{bash.MARKER} {code};", proc.stderr)
 
-    def test_group_keeps_shell_state_and_heredocs_work(self):
+    def test_heredocs_and_cd_work_within_the_call(self):
         with tempfile.TemporaryDirectory() as directory:
             proc = self.run_wrapped(f"cd {directory}\npwd\ncat <<EOF\nhello\nEOF", "/bin/zsh")
             self.assertEqual(os.path.realpath(proc.stdout.splitlines()[0]), os.path.realpath(directory))
             self.assertIn("hello", proc.stdout)
 
-    def test_plain_commands_stay_in_the_same_shell(self):
-        for command in ("npm test", "cd sub && ls", "git status"):
-            self.assertEqual(bash.wrap(command).split("\n")[1], "{", command)
+    def test_no_trap_so_worktree_sessions_can_run_commands(self):
+        # Claude Code's worktree-isolation guard can't verify a trap's body and
+        # refuses the whole command (issue #1).
+        for command in ("pwd", "npm test", "git status", "exec false", "eval 'false'", "source ./x.sh", "trap - EXIT; exit 3"):
+            wrapped = bash.wrap(command)
+            self.assertNotIn("trap", wrapped.replace(command, ""), command)
+            self.assertTrue(wrapped.startswith("(\n"), command)
 
     def test_idempotent_and_skips_only_comment_only_commands(self):
         once = bash.wrap("ls")
@@ -74,7 +79,7 @@ class BashWrapper(unittest.TestCase):
         self.assertEqual(bash.wrap("   "), "   ")
         self.assertEqual(bash.wrap("# note\n\n"), "# note\n\n")
 
-    def test_commands_that_could_dodge_the_trap_are_still_reported(self):
+    def test_commands_that_could_end_the_shell_are_still_reported(self):
         for shell in ("/bin/zsh", "/bin/bash"):
             for command, code in (
                 ("echo a; false \\", 1),
@@ -82,11 +87,39 @@ class BashWrapper(unittest.TestCase):
                 ("exec false", 1),
                 ("trap - EXIT; exit 3", 3),
                 ("trap '' EXIT; echo x; exit 4", 4),
+                ("echo a; false # a comment", 1),
+                ("cat <<'EOF'\n$(not run)\nEOF\nexit 5", 5),
+                ("cat <<-EOF\n\tbody\n\tEOF\nfalse", 1),
+                ("cat <<EOF\nlast\nEOF", 0),
+                ("case x in x) echo ok;; esac; exit 6", 6),
+                ("((n = 1)); (exit 7)", 7),
+                ("echo ')' \"(\"; false", 1),
+                ("grep -q x <<< y", 1),
+                ("sleep 0 &\nwait; exit 8", 8),
             ):
                 with self.subTest(shell=shell, command=command):
                     proc = self.run_wrapped(command, shell)
                     self.assertEqual(proc.returncode, 0, proc.stderr)
-                    self.assertIn(f"{bash.MARKER} {code};", proc.stderr)
+                    if code:
+                        self.assertIn(f"{bash.MARKER} {code};", proc.stderr)
+                    else:
+                        self.assertNotIn(bash.MARKER, proc.stderr)
+
+    def test_claude_codes_cwd_note_still_runs_and_a_cd_stays_in_its_call(self):
+        """Claude Code runs `eval '<command>' && pwd -P >| <cwd file>` and moves
+        the next call there. The wrapper must end in success so that note is
+        written, whatever the command did; its `cd` no longer reaches it."""
+        for shell in ("/bin/zsh", "/bin/bash"):
+            with tempfile.TemporaryDirectory() as start, tempfile.TemporaryDirectory() as elsewhere:
+                for command in ("exit 3", "set -e; false", "echo ${NOPE_UNSET_VAR:?x}", f"cd {elsewhere}", "true"):
+                    with self.subTest(shell=shell, command=command):
+                        note = os.path.join(start, "cwd")
+                        script = f"eval {shlex.quote(bash.wrap(command))} && pwd -P >| {note}"
+                        proc = subprocess.run([shell, "-c", script], cwd=start, capture_output=True, text=True, timeout=20)
+                        self.assertEqual(proc.returncode, 0, proc.stderr)
+                        with open(note) as handle:
+                            self.assertEqual(handle.read().strip(), os.path.realpath(start))
+                        os.remove(note)
 
 
 class Prompts(unittest.TestCase):
@@ -473,9 +506,9 @@ class FourthReview(unittest.TestCase):
 
 
 class StrictSubshellAndBlobs(unittest.TestCase):
-    def test_eval_source_and_exec_run_in_a_subshell(self):
-        for command in ("eval 'false'", "source ./x.sh", ". ./x.sh", "command exec ls", "docker exec app ls"):
-            self.assertEqual(bash.wrap(command).split("\n")[1], "(", command)
+    def test_every_command_runs_in_a_subshell(self):
+        for command in ("eval 'false'", "source ./x.sh", ". ./x.sh", "command exec ls", "npm test", "cd sub && ls"):
+            self.assertEqual(bash.wrap(command).split("\n")[0], "(", command)
 
     def test_a_blob_that_starts_binary_but_is_not_an_image_is_masked(self):
         import base64 as b64

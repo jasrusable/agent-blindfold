@@ -6,58 +6,43 @@ whose output can't be replaced: `cat .env; exit 1` would show its secrets raw.
 So blindfold makes each Bash command exit 0 and report the real exit code instead.
 Grok doesn't need this: its PostToolUse covers failures too.
 
-The command runs in a `{ … }` group in the same shell, so `cd` persists to the
-next call as usual. An EXIT trap catches the ways the shell itself can die
-(`exit`, `set -e`, `${X:?}`, a sourced script that exits) and turns them into
-the same report and exit 0. A command that could get around the trap runs in
-a `( … )` subshell instead: nounset (zsh skips EXIT traps when it kills the
-shell), `exec` (replaces the shell) and `trap` (could replace ours). That costs
-that one call its `cd` persistence. The status is never tested
-with `||`, which would silently disable `set -e`. Verified against real Claude: masking on
-every exit path, `cd` persisting, allow rules still matching and deny rules
-still enforced.
+The command runs in a `( … )` subshell and the parent reports its status, so
+every way the command can end its shell (`exit`, `set -e`, `${X:?}`, nounset,
+`exec`, zsh's "no matches found", a sourced script that exits) ends only the
+subshell. No `trap`: Claude Code's worktree-isolation guard can't verify a trap's
+body and refuses every command that has one. The status is never tested with
+`||`, which would silently disable `set -e`, and the report itself succeeds, so
+Claude Code's own `&& pwd -P >| <cwd file>` after it still runs.
+
+The cost: Claude Code keeps the working directory between calls by running
+`pwd -P` in the parent shell after the command, so a `cd` inside the subshell
+no longer carries over to the next call. `cd dir && cmd` within one call works.
+The selftest checks through real Claude that failing commands are masked, allow
+rules still match and deny rules are still enforced.
 
 Not covered: a command Claude kills (its timeout, or Esc), and `kill $$`.
 Their output goes down the failure path, and blindfold warns the user instead
 (handlers.py). Trapping TERM/INT would change how commands stop when asked to.
 """
 
-import re
-
 MARKER = "[blindfold: exit code"
 _REPORT = (
-    'blindfold_rc=$?; trap - EXIT; [ "$blindfold_rc" -eq 0 ] || '
+    'blindfold_rc=$?; [ "$blindfold_rc" -eq 0 ] || '
     f"printf '\\n{MARKER} %s; reported as success so its output could be masked]\\n' \"$blindfold_rc\" >&2"
 )
-# Run in a subshell, where they can't stop the parent reporting: nounset in any
-# spelling (zsh skips EXIT traps when it kills the shell), `exec` (replaces the
-# shell, so no EXIT trap runs), and `trap` (could replace or clear ours).
-# Matched conservatively (anywhere): a regex can't parse shell the way the
-# shell does, so when in doubt the subshell is used, at the cost of that call's
-# `cd` persistence. `eval` and `source` can do any of these.
-_NEEDS_SUBSHELL = re.compile(
-    r"\bset\s+-[A-Za-z]*u|nounset|no_?unset|\bexec\b|\btrap\b|\beval\b|\bsource\b|(?:^|[;&|(]\s*)\.\s",
-    re.IGNORECASE | re.MULTILINE,
-)
-
+# The blank line before the closing parenthesis ends a trailing `\` line
+# continuation or comment, and closes nothing else: a here-document's
+# delimiter line has already been read.
+_OPEN, _CLOSE = "(\n", f"\n\n)\n{_REPORT}"
 
 
 def _only_comments(command: str) -> bool:
-    """Blank lines and comments only: wrapped, that is an empty group, a syntax error."""
+    """Blank lines and comments only: wrapped, that is an empty subshell, a syntax error."""
     return all(not line.strip() or line.strip().startswith("#") for line in command.splitlines())
 
 
-_TRAP = "trap '" + _REPORT.replace("'", "'\\''") + "; exit 0' EXIT"
-
-
 def wrap(command: str) -> str:
-    """The command made to exit 0, reporting a failure's code on stderr.
-
-    Already wrapped is recognised by the exact trap line (a command that merely
-    mentions the marker is still wrapped). The blank line before the closing
-    brace absorbs a trailing `\\` line continuation.
-    """
-    if command.startswith(_TRAP) or _only_comments(command):
+    """The command made to exit 0, reporting a failure's code on stderr."""
+    if (command.startswith(_OPEN) and command.endswith(_CLOSE)) or _only_comments(command):
         return command
-    opening, closing = ("(", ")") if _NEEDS_SUBSHELL.search(command) else ("{", "}")
-    return f"{_TRAP}\n{opening}\n{command}\n\n{closing}\n{_REPORT}"
+    return f"{_OPEN}{command}{_CLOSE}"

@@ -45,9 +45,15 @@ That would leave `cat .env; exit 1` or a crashing script that dumps its config
 unmasked. So blindfold rewrites each Bash command to exit 0 and report the real exit
 code on stderr as `[blindfold: exit code N; …]`, which sends its output down the
 success path that blindfold can mask.
-- A plain command runs in a `{ … }` group, so `cd` still carries over to the next call.
-- A command that could end the shell itself (`exit`, `exec`, `set -e`) runs in a
-  subshell, and `set -e` keeps working.
+- The command runs in a `( … )` subshell, so whatever ends it (`exit`, `exec`,
+  `set -e`, `${X:?}`, zsh's "no matches found") ends only the subshell, and
+  `set -e` keeps working.
+- No `trap`: Claude Code's worktree-isolation guard can't verify a trap's body,
+  so it refused every wrapped command in a worktree session.
+- The cost: a `cd` no longer carries over to the next call. Claude Code keeps
+  the working directory by running `pwd -P` in the parent shell after each
+  command, which a subshell's `cd` doesn't reach. `cd dir && cmd` in one call
+  works, and the session note tells the agent.
 - The status is never tested with `||`, which would silently disable `set -e`.
 - Your permission rules still match the rewritten command; the selftest checks
   this.
@@ -72,18 +78,29 @@ Before each call, blindfold refuses one that would change blindfold itself:
   `settings.local.json`, or a full write that drops them. Other settings edits
   are fine.
 - **Turning hooks off:** `disableAllHooks` written into a settings file, by any tool.
-- **Shell commands that use a protected path:** writing into it, running
-  inside it (`cd` included), feeding its files to `xargs`, a shell or a loop,
-  or running code (Python, Node, …) that names it. Read-only parts (`ls`,
-  `cat`, `grep`, `git log`, `blindfold doctor`, …) are fine, and so is text that
-  only mentions a path: a note or doc written with `cat`, `tee`, `echo` or
-  `printf` to a file elsewhere. Shell rewrites of the agent settings file are
-  refused; the file-edit tools are checked precisely instead.
+- **Shell commands that write to a protected path:** a redirection into it;
+  `rm`, `mv`, `touch`, `chmod`, `chown`, `tee`, `truncate`, `sed -i`, an editor
+  or `patch` given a path there; `cp`, `ln`, `rsync` or `install` with it as the
+  destination; `dd of=`; `find … -delete`; a git command that changes a
+  repository there (`pull`, `checkout`, `reset`, `config` set, `remote add`, `-c`
+  anything); any other command given a path there as an argument (`pip install
+  -e`, `npm --prefix=`, `curl -o`, `tar -C`); anything but a read run inside it
+  (`cd` followed); running a file from it. Shell writes to the agent settings
+  file are refused the same way; the file-edit tools are checked precisely
+  instead.
+- **Code it can't follow that names one:** a shell, Python, Node, `xargs`,
+  `awk`, `find -exec`, a `$(…)` or backtick substitution, a heredoc run by a
+  shell, a file written and then run, a command it can't parse. These may not
+  even name a protected path.
 
-Commands are split the way the shell splits them (quotes, escapes,
-here-documents), so a `|` inside a grep pattern or a path inside a heredoc of
-notes isn't mistaken for use. The same applies to the blocked commands: a
-heredoc saved to a file is data, while one piped into a shell is judged.
+Reads are fine (`ls`, `cat`, `cp` from it, `git -C … log`, `remote -v`,
+`fetch`, `blindfold doctor`, …), and so is text that names a path: a heredoc
+saved to a file or printed, a quoted message or issue body (`--body "…"`,
+`-m "…"`, `"$(cat <<'EOF' … EOF)"`), any word with spaces. Commands are split
+and unquoted the way the shell does it (quotes, escapes, here-documents,
+comments), so a `|` inside a grep pattern or a path inside a heredoc of notes
+isn't mistaken for use. The same applies to the blocked commands: a heredoc
+saved to a file is data, while one piped into a shell is judged.
 
 Changes to blindfold go through the user, who can type `! <command>`. Your
 development checkout is not protected; only the copy the hook runs from is.

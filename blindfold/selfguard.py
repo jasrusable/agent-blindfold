@@ -3,17 +3,19 @@ is running, its config and key, its skill links, its entries in the agents'
 settings, or a switch that turns hooks off. An agent tidying settings, or a
 stray git command, must not quietly turn masking off; the user makes those
 changes. Like the command denylist, this guards against accidents, not intent,
-and it judges real use, not mentions: notes or docs that name a path are fine.
+and it judges writes, not mentions: reading blindfold's files is fine, and so is
+text that names a path (a note, a heredoc, an issue body, a commit message).
 """
 
+import functools
 import os
 import re
-import shlex
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from . import shell
 from .cli_paths import REPO
 from .config import CONFIG_DIR
+from .shell import Word
 from .structure import strings
 
 PROTECTED = [
@@ -35,19 +37,47 @@ _HOOK_COMMAND = re.compile(r"[^\s\"']*blindfold(?: [^\s\"']+){0,4} hook")
 # managed-settings.json, anything under a .claude directory.
 _SETTINGS_FILE = re.compile(r"settings[^/]*\.json$|(?:^|/)\.claude/", re.IGNORECASE)
 
-# Parts of a shell command that only read: allowed even on a protected path.
-_READ_ONLY = re.compile(
-    r"(?:cd|ls|cat|head|tail|less|grep|egrep|wc|stat|file|diff|readlink|realpath|test|\[|echo|printf|jq)(?:\s.*)?"
-    r"|find(?:\s(?:(?!-delete|-exec|-ok|-fprint|-fls).)*)?"
-    r"|git(?:\s+-C\s+\S+)?\s+(?:status|log|show|diff|rev-parse|branch|describe)(?:\s.*)?"
-    r"|\S*blindfold\s+(?:doctor|scan|hook|selftest|install(?!.*--apply))(?:\s.*)?",
-    re.DOTALL,
+# How a command treats the paths it is given, once past sudo, env and the like.
+# Readers only read them. Runners run code that can't be followed, so they may
+# not even name a protected path. Writers may write any argument, copiers only
+# their destination. Anything else may write any argument that is a path.
+_READERS = frozenset(
+    "ls cat head tail less more grep egrep fgrep rg wc stat file diff cmp readlink realpath test [ echo printf "
+    "jq du md5 md5sum shasum sha256sum basename dirname pwd which type true false : read cut tr nl strings "
+    "export declare local readonly unset set shopt setopt for select".split()
 )
-_QUOTED = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
-_HARMLESS_REDIRECT = re.compile(r"\d?>&\d|\d?>\s*/dev/null")
+_RUNNERS = frozenset("sh bash zsh dash ksh fish csh tcsh eval source . xargs parallel awk gawk nawk mawk osascript alias".split())
+_INTERPRETER = re.compile(r"(?:python|pypy|node|nodejs|deno|bun|perl|ruby|php|lua)[\d.]*")
+_WRITERS = frozenset(
+    "rm rmdir unlink shred truncate touch mkdir chmod chown chgrp chflags xattr setfacl tee mv patch "
+    "vi vim nvim nano emacs ed ex code subl".split()
+)
+_COPIERS = frozenset("cp ln rsync install scp ditto".split())
+_WRAPPERS = frozenset("sudo doas env command builtin exec nice nohup time timeout gtimeout caffeinate stdbuf unbuffer".split())
+_KEYWORDS = frozenset("if then else elif fi do done while until { } ! esac".split())
+_LAUNCHER_READS = ("doctor", "scan", "hook", "selftest")
+_GIT_READS = frozenset(
+    "status log show diff rev-parse describe ls-files ls-tree ls-remote blame grep cat-file rev-list shortlog "
+    "show-ref for-each-ref name-rev merge-base whatchanged show-branch count-objects check-ignore check-attr var "
+    "help version fetch".split()
+)
+# Flags that make branch, tag, remote, config and the like change something.
+_GIT_CHANGES = frozenset(
+    "-d -D -m -M -c -C -f --delete --move --copy --force -u --set-upstream-to --unset-upstream --edit-description "
+    "--add --unset --unset-all --replace-all --rename-section --remove-section --edit -e".split()
+)
+_WRITE_OPS = frozenset((">", ">>", ">|", "&>", "&>>", "<>"))
+_FIND_WRITES = ("-fprint", "-fprint0", "-fprintf", "-fls")
+_FIND_RUNS = ("-exec", "-execdir", "-ok", "-okdir")
+_OPTION_VALUE = re.compile(r"^-{1,2}[\w.-]+=")
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_NUMBER = re.compile(r"\d+(?:\.\d+)?[smhd]?")
+_SETTINGS_REASON = "it may rewrite the agent settings; use the file-edit tool, which checks blindfold's hooks stay"
 
 
+@functools.lru_cache(maxsize=4096)
 def _resolve(path: str) -> str:
+    """Resolved once per path per hook run: a command can name many."""
     return os.path.realpath(os.path.expanduser(path))
 
 
@@ -82,96 +112,268 @@ def _cached_spellings(path: str) -> List[str]:
     return _SPELLINGS[path]
 
 
-def _is_read_only_part(part: str) -> bool:
-    if "`" in part or "$(" in part or "\n" in part:
-        return False
-    bare = _QUOTED.sub("Q", part)
-    if ">" in _HARMLESS_REDIRECT.sub("", bare) or "'" in bare or '"' in bare:
-        return False
-    return bool(_READ_ONLY.fullmatch(bare.strip()))
-
-
-def is_read_only_command(command: str) -> bool:
-    return all(_is_read_only_part(part) for part in shell.parts(command))
-
-
-# The directory after a cd we can't follow: maybe anywhere, so nothing that
-# writes relative to it counts as "elsewhere".
+# The directory after a cd we can't follow: maybe anywhere, so a relative path
+# there counts as protected when the command names a protected path. (No cwd
+# at all, None, is no information: relative paths aren't judged.)
 _UNKNOWN = "<unknown directory>"
 
 
-def _data_targets(part: str, here: Optional[str]) -> Optional[List[str]]:
-    """The files a plain cat/tee/echo/printf writes, resolved against here, or
-    None if the part is anything else: what such a part says (a heredoc of
-    notes naming a path) is data, not use."""
-    line = shell.first_line(part)
-    if shell.head(line) not in shell.DATA_COMMANDS or shell.runs_substitution(part):
-        return None
-    targets = shell.write_targets(part)
-    if not targets or not all(shell.is_plain_file(t) for t in targets):
-        return None
-    expanded = [os.path.expanduser(t) for t in targets]
-    if here == _UNKNOWN and not all(os.path.isabs(t) for t in expanded):
-        return None
-    base = here if here and here != _UNKNOWN else os.getcwd()
-    return [os.path.join(base, t) for t in expanded]
-
-
-def _cd(line: str, here: Optional[str], previous: Optional[str], protected: List[str]) -> Optional[str]:
-    """The directory after `cd …`, unquoted as the shell would. A target that
-    names a protected path, or contains one's folder name, counts as inside it
-    however it's spelled; any other target that can't be followed is unknown."""
-    try:
-        words = shlex.split(line)
-    except ValueError:
-        words = []
-    args = [word for word in words[1:] if not word.startswith("-") or word == "-"]
-    target = os.path.expandvars(os.path.expanduser(args[0])) if args else os.path.expanduser("~")
-    if target == "-":
+def _cd(words: List[Word], text: str, here: Optional[str], previous: Optional[str], protected: List[str]) -> Optional[str]:
+    """The directory after `cd …`. A target that names a protected path, or
+    contains one's folder name, counts as inside it however it's spelled; any
+    other target that can't be followed is unknown."""
+    targets = [word for word in words[1:] if not word.text.startswith("-") or word.text == "-"]
+    target = targets[0] if targets else Word(os.path.expanduser("~"))
+    if target.text == "-":
         return previous or _UNKNOWN
-    if not words or any(mark in target for mark in ("$", "`", "(")):
-        named = _named(line, protected) or next((root for root in protected if os.path.basename(_resolve(root)) in line), None)
+    if target.dynamic:
+        named = _named(text, protected) or next((root for root in protected if os.path.basename(_resolve(root)) in text), None)
         return _resolve(named) if named else _UNKNOWN
-    if not os.path.isabs(target):
-        if here == _UNKNOWN:
-            return _UNKNOWN
-        if here:
-            return os.path.normpath(os.path.join(here, target))
-    return os.path.abspath(target)
+    if os.path.isabs(target.text):
+        return os.path.normpath(target.text)
+    return here if here in (None, _UNKNOWN) else os.path.normpath(os.path.join(here, target.text))
+
+
+def _split_redirects(words: List[Word]) -> Tuple[List[Word], List[Word]]:
+    """(the files redirections write, the remaining words). Input redirections
+    and here-document delimiters are dropped; `>&2` duplicates a descriptor."""
+    targets: List[Word] = []
+    rest: List[Word] = []
+    pending: Optional[str] = None
+    for word in words:
+        if pending is not None:
+            duplicate = pending in (">&", "<&") and (word.text.isdigit() or word.text == "-")
+            if (pending in _WRITE_OPS or pending == ">&") and not duplicate:
+                targets.append(word)
+            pending = None
+        elif word.op:
+            pending = word.text
+        else:
+            rest.append(word)
+    return targets, rest
+
+
+def _command(words: List[Word]) -> Tuple[List[Word], int, int]:
+    """The command word and its arguments, past assignments, keywords and
+    wrappers (sudo, env -i, timeout 5, …), plus how many subshell parentheses
+    the part opens and closes."""
+    opened = closed = 0
+    while words and words[0].text.startswith("(") and not words[0].dynamic:
+        stripped = words[0].text.lstrip("(")
+        opened += len(words[0].text) - len(stripped)
+        words = ([words[0]._replace(text=stripped)] if stripped else []) + words[1:]
+    while words and words[-1].text.count(")") > words[-1].text.count("("):
+        last = words[-1].text
+        excess = last.count(")") - last.count("(")
+        closed += excess
+        words = words[:-1] + ([words[-1]._replace(text=last[:-excess])] if last[:-excess] else [])
+    wrapped = False
+    while words:
+        text = words[0].text
+        skip = not text or _ASSIGNMENT.match(text) or text in _KEYWORDS or (
+            wrapped and (text.startswith("-") or _NUMBER.fullmatch(text))
+        )
+        if not skip and text in _WRAPPERS:
+            wrapped = skip = True
+        if not skip:
+            break
+        words = words[1:]
+    return words, opened, closed
+
+
+def _kind(words: List[Word]) -> str:
+    """How the command treats its arguments (see _READERS)."""
+    if not words:
+        return "none"
+    name = words[0].text.rsplit("/", 1)[-1]
+    texts = [word.text for word in words[1:]]
+    if name == "blindfold":
+        first = [text for text in texts if not text.startswith("-")][:1]
+        reads = first and (first[0] in _LAUNCHER_READS or (first[0] == "install" and "--apply" not in texts))
+        return "launcher" if reads else "other"
+    if name == "sed":
+        return "writer" if any(re.match(r"-[A-Za-z]*i|--in-place", text) for text in texts) else "reader"
+    if name == "find":
+        return "runner" if set(texts) & set(_FIND_RUNS) else "find"
+    if name in ("cd", "git", "dd"):
+        return name
+    if name in _READERS:
+        return "reader"
+    if name in _RUNNERS or _INTERPRETER.fullmatch(name):
+        return "runner"
+    return "writer" if name in _WRITERS else "copier" if name in _COPIERS else "other"
+
+
+def _git(args: List[Word]) -> Tuple[bool, List[Word], List[Word]]:
+    """(only reads, the repositories it names with -C and the like, its subcommand's arguments)."""
+    rest, repos, risky = list(args), [], False
+    while rest and rest[0].text.startswith("-"):
+        option = rest.pop(0)
+        name, _, value = option.text.partition("=")
+        if name in ("-C", "--git-dir", "--work-tree"):
+            repos += [option] if value else rest[:1]
+            rest = rest if value else rest[1:]
+        elif name in ("-c", "--config-env", "--exec-path", "--namespace"):
+            # -c can set an alias, a pager or the hooks path: not a plain read.
+            risky = True
+            rest = rest if value or name == "--exec-path" else rest[1:]
+    sub, sub_args = (rest[0].text, [word.text for word in rest[1:]]) if rest else ("", [])
+    return not risky and _git_reads(sub, sub_args), repos, rest[1:]
+
+
+def _git_reads(sub: str, args: List[str]) -> bool:
+    flags = {arg for arg in args if arg.startswith("-")}
+    first = [arg for arg in args if not arg.startswith("-")][:1]
+    if sub in _GIT_READS:
+        return True
+    if flags & _GIT_CHANGES:
+        return False
+    return {
+        "branch": not first,
+        "tag": not first,
+        "remote": first in ([], ["show"], ["get-url"]),
+        "config": bool(flags & {"--get", "--get-all", "--get-regexp", "--list", "-l"}) or first in (["get"], ["list"]),
+        "stash": first in (["list"], ["show"]),
+        "worktree": first == ["list"],
+        "reflog": first in ([], ["show"]),
+        "submodule": first == ["status"],
+        "notes": first in (["list"], ["show"]),
+    }.get(sub, False)
+
+
+def _targets(kind: str, words: List[Word]) -> List[Word]:
+    """The words a command may write to."""
+    args = words[1:]
+    positional = [word for word in args if not word.text.startswith("-")]
+    if kind == "writer":
+        return positional
+    if kind == "copier":
+        explicit = [after for word, after in zip(args, args[1:]) if word.text in ("-t", "--target-directory")]
+        explicit += [word for word in args if word.text.startswith("--target-directory=")]
+        return explicit or positional[-1:]
+    if kind == "dd":
+        return [word._replace(text=word.text[3:], prefix=word.prefix[3:]) for word in args if word.text.startswith("of=")]
+    if kind == "find":
+        starts = args[: next((i for i, word in enumerate(args) if word.text[:1] in "-(!"), len(args))]
+        written = [after for word, after in zip(args, args[1:]) if word.text in _FIND_WRITES]
+        return written + (starts if any(word.text == "-delete" for word in args) else [])
+    if kind == "other":
+        # The command word too (running a file from a protected path). Words
+        # with spaces are text (a message, a body), not paths.
+        return [word for word in words if not any(char.isspace() for char in word.text)]
+    return []
+
+
+def _root(word: Word, here: Optional[str], guarded: List[str], named: Optional[str]) -> Optional[str]:
+    """The guarded path a word names as a file, if any. A word the shell
+    still expands counts when its literal start leads into one, or when the
+    command names one anywhere (X=<path>; rm -rf $X)."""
+    if word.dynamic:
+        return _root_of_prefix(_OPTION_VALUE.sub("", word.prefix, count=1), here, guarded) or named
+    text = _OPTION_VALUE.sub("", word.text, count=1)
+    if not text or text.startswith("-"):
+        return None
+    if not os.path.isabs(text):
+        if here in (None, _UNKNOWN):
+            return named if here == _UNKNOWN else None
+        text = os.path.join(here, text)
+    return _inside(text, guarded)
+
+
+def _root_of_prefix(prefix: str, here: Optional[str], guarded: List[str]) -> Optional[str]:
+    """A guarded path the literal start of an expanding word may lead into
+    (~/.config/$X, ~/.local/share/agent-*). Not home or above: ~/$X would match
+    everything."""
+    if not prefix or (here in (None, _UNKNOWN) and not os.path.isabs(prefix)):
+        return None
+    resolved = _resolve(os.path.join(here or "", prefix))
+    if os.path.expanduser("~").startswith(resolved):
+        return None
+    stem = resolved + os.sep if prefix.endswith("/") else resolved
+    return next((root for root in guarded if (_resolve(root) + os.sep).startswith(stem)), None) or _inside(resolved, guarded)
+
+
+def _why(root: str, settings: List[str]) -> str:
+    return _SETTINGS_REASON if root in settings else f"it changes {root}"
+
+
+def _pipelines(segments: List[Tuple[str, str, str]]) -> List[str]:
+    """For each part, the text of the whole pipeline it is in: what a runner
+    reads on stdin comes from the parts before it."""
+    groups: List[List[int]] = [[]]
+    for index, (_, _, separator) in enumerate(segments):
+        groups[-1].append(index)
+        if separator != "|":
+            groups.append([])
+    text = {index: "\n".join(segments[i][0] + segments[i][1] for i in group) for group in groups for index in group}
+    return [text[index] for index in range(len(segments))]
 
 
 def _command_reason(command: str, cwd: Optional[str], protected: List[str], settings: List[str]) -> Optional[str]:
-    """Deny by default: once a command names a protected path (outside here-
-    document bodies saved as data), or runs inside one, every part must be
-    read-only or a plain data write elsewhere that no later part runs."""
+    """Refuse a command that writes to a protected path or the agent settings:
+    a redirection, a writer's argument, a copier's destination, a git command
+    that changes a repository there, anything but a read run inside one, a file
+    run from one. A runner (a shell, Python, xargs, …), a substitution or a
+    part that can't be parsed may not even name one, since what it does can't
+    be followed. Text is data: a heredoc saved or piped to a command that
+    doesn't run it, a quoted message, a word with spaces."""
     guarded = protected + settings
-    names_protected = _named(shell.strip_data_heredocs(command), protected)
-    pairs = shell.split(command)
-    here, previous, key_written = cwd, None, False
-    for index, (part, _) in enumerate(pairs):
-        line = shell.first_line(part)
-        if shell.head(line) == "cd":
-            here, previous = _cd(line, here, previous, protected), here
+    segments = shell.segments(shell.inline_literal_heredocs(command))
+    pairs = [(text + body, separator) for text, body, separator in segments]
+    pipelines = _pipelines(segments)
+    named = next(filter(None, (_named(text, guarded) for text, _, _ in segments)), None)
+    here, previous, scopes, key_written = cwd, None, [], False
+    for index, (text, body, _) in enumerate(segments):
+        parsed = shell.words(text)
+        if parsed is None:
+            unclear = _named(text + body, guarded)
+            if unclear:
+                return _why(unclear, settings)
             continue
-        if _is_read_only_part(part):
-            continue
-        if key_written:
-            return f"it writes {DISABLE_HOOKS} and then runs more"
-        targets = _data_targets(part, here)
-        elsewhere = targets is not None and not any(
-            _named(t, guarded) or _inside(t, guarded) or shell.runs_file(pairs[index + 1 :], t) for t in targets
-        )
-        if DISABLE_HOOKS.lower() in part.lower():
-            if not elsewhere or any(_SETTINGS_FILE.search(t) for t in targets or []):
-                return f"it sets {DISABLE_HOOKS}"
-            key_written = True
-        if elsewhere:
-            continue
-        inside = _inside(here, protected) if here and here != _UNKNOWN else None
-        if inside or names_protected:
-            return f"it changes {inside or names_protected}"
-        if _named(part, settings):
-            return "it may rewrite the agent settings; use the file-edit tool, which checks blindfold's hooks stay"
+        redirects, rest = _split_redirects(parsed[0])
+        words, opened, closed = _command(rest)
+        scopes += [here] * opened
+        kind = _kind(words)
+        if kind == "cd":
+            here, previous = _cd(words, text, here, previous, protected), here
+        git_reads, repos, git_args = _git(words[1:]) if kind == "git" else (False, [], [])
+        reads = kind in ("cd", "reader", "launcher", "find", "none") or git_reads
+        runs = kind == "runner" or parsed[1] or shell.body_substitutes(text, body)
+        unclear = _named(pipelines[index] if kind == "runner" else text + body, guarded) if runs else None
+        if unclear:
+            return _why(unclear, settings)
+        if kind == "git" and not git_reads:
+            changed = [word for word in git_args if os.path.isabs(word.text) or word.dynamic]
+            # No -C: the repository it is in, which may be anywhere after a cd it can't follow.
+            current = [] if here is None else [Word("", dynamic=True)] if here == _UNKNOWN else [Word(here)]
+            redirects = redirects + changed + (repos or current)
+        for word in redirects + _targets(kind, words):
+            root = _root(word, here, guarded, named)
+            if root:
+                return _why(root, settings)
+        inside = None if reads or here in (None, _UNKNOWN) else _inside(here, protected)
+        if inside:
+            return f"it runs inside {inside}"
+        tee = words[0].text == "tee" if words else False
+        written = [word.text for word in redirects + (_targets("writer", words) if tee else [])]
+        later = pairs[index + 1 :]
+        mentioned = _named(text + body, guarded)
+        if mentioned and any(shell.runs_file(later, path) for path in written):
+            return f"it writes a file that names {mentioned} and then runs it"
+        if not reads or redirects:
+            if key_written:
+                return f"it writes {DISABLE_HOOKS} and then runs more"
+            if DISABLE_HOOKS.lower() in (text + body).lower():
+                data = (
+                    bool(words) and words[0].text in shell.DATA_COMMANDS and bool(written) and not runs
+                    and all(shell.is_plain_file(path) and not _SETTINGS_FILE.search(path) for path in written)
+                    and not any(shell.runs_file(later, path) for path in written)
+                )
+                if not data:
+                    return f"it sets {DISABLE_HOOKS}"
+                key_written = True
+        for _ in range(min(closed, len(scopes))):
+            here = scopes.pop()
     return None
 
 
