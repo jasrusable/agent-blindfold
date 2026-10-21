@@ -1,5 +1,6 @@
 """The small shell model the guards use to tell a mention from a use."""
 
+import os
 import unittest
 
 from blindfold import shell
@@ -69,6 +70,59 @@ class Parts(unittest.TestCase):
                       "grep -c foo x.sh", "ls -la x.sh", "wc -l < /tmp/dir/x.sh",
                       "cat ~/notes/x.sh", "wc -l </tmp/x.sh"):
             self.assertFalse(runs(later), later)
+
+    def test_segments_keep_heredoc_bodies_apart_from_the_text_that_runs(self):
+        self.assertEqual(shell.segments("cat > a.md <<EOF && echo done\nbody\nEOF"),
+                         [("cat > a.md <<EOF", "\nbody\nEOF", "&&"), ("echo done", "", "\n")])
+
+    def test_words_unquote_like_the_shell(self):
+        home = os.path.expanduser("~")
+
+        def texts(line):
+            return [word.text for word in shell.words(line)[0]]
+
+        self.assertEqual(texts("cat x '|' > out 2>&1 # a comment"), ["cat", "x", "|", ">", "out", ">&", "1"])
+        self.assertEqual(texts('echo "a \\"b\\"" ~/x "$HOME/y" a#b'), ["echo", 'a "b"', f"{home}/x", f"{home}/y", "a#b"])
+        self.assertEqual(texts("rm -rf \\\n  /a"), ["rm", "-rf", "/a"])
+        self.assertEqual(texts("echo x>f"), ["echo", "x", ">", "f"])
+        self.assertIsNone(shell.words("echo 'open"))
+        dynamic = {word.text: (word.dynamic, word.prefix) for word in shell.words("ls $X/a ~/b/* plain")[0]}
+        self.assertEqual(dynamic["$X/a"], (True, ""))
+        self.assertEqual(dynamic[f"{home}/b/*"], (True, f"{home}/b/"))
+        self.assertEqual(dynamic["plain"], (False, ""))
+
+    def test_words_see_substitutions_outside_single_quotes_only(self):
+        for line in ("echo $(x)", 'echo "`x`"', "cat <(x)", "echo hi > >(x)"):
+            self.assertTrue(shell.words(line)[1], line)
+        for line in ("echo '$(x)'", "echo '`x`'", "echo plain"):
+            self.assertFalse(shell.words(line)[1], line)
+
+    def test_a_literal_heredoc_substitution_becomes_its_text(self):
+        command = "gh issue create --body \"$(cat <<'EOF'\nIt's \"quoted\" $(not run)\nEOF\n)\" && echo ok"
+        inlined = shell.inline_literal_heredocs(command)
+        self.assertEqual(shell.words(shell.segments(inlined)[0][0])[0][-1].text, "It's \"quoted\" $(not run)")
+        self.assertFalse(shell.words(shell.segments(inlined)[0][0])[1])
+        for kept in ("echo \"$(cat <<EOF\n$(x)\nEOF\n)\"", "echo \"title: $(cat <<'EOF'\nx\nEOF\n)\""):
+            self.assertEqual(shell.inline_literal_heredocs(kept), kept)
+
+    def test_a_heredoc_body_is_inlined_only_where_every_shell_ends_it_the_same_way(self):
+        for kept in (
+            "echo \"$(cat <<'EOF'\nx\nEOF)\"; touch y\nEOF\n)\"",  # bash ends at `EOF)`, zsh doesn't
+            "echo \"$(cat <<'EOF'\nx\nEOF \ny\nEOF\n)\"",
+            "echo \"$(cat <<'EOF'\nx\nEOF\n; touch y)\"",
+            "echo '$(cat <<\"EOF\"\nx\nEOF\n)'",
+            "cat <<'X'\n$(cat <<'EOF'\nx\nEOF\n)\nX",
+        ):
+            self.assertEqual(shell.inline_literal_heredocs(kept), kept, kept)
+        self.assertEqual(shell.inline_literal_heredocs("a $(cat <<-'EOF'\n\tx\n\tEOF\n) b"), "a 'x' b")
+
+    def test_comments_ansi_quotes_here_strings_and_a_lone_ampersand(self):
+        self.assertEqual(shell.parts("echo hi # don't\nls"), ["echo hi", "ls"])
+        self.assertEqual(shell.parts("echo $'a\\'b'; ls"), ["echo $'a\\'b'", "ls"])
+        self.assertEqual(shell.parts("cat <<<x\nls"), ["cat <<<x", "ls"])
+        self.assertEqual(shell.parts("sleep 1 & ls 2>&1 &> f"), ["sleep 1", "ls 2>&1 &> f"])
+        self.assertEqual(shell.parts("cat <<E\"OF\"\nx\nEOF"), ["cat <<E\"OF\"", "x", "EOF"])
+        self.assertIsNone(shell.words("echo a\nb"))
 
     def test_heads_and_write_targets(self):
         self.assertEqual(shell.head("A=1 B=2 /usr/bin/env python3 x"), "env")
