@@ -8,6 +8,7 @@ secret is picked up immediately. Values are held only in memory.
 """
 
 import base64
+import fnmatch
 import glob
 import json
 import os
@@ -17,7 +18,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote
 
-from .rules import PLACEHOLDER_VALUE, is_secret_name, shannon_entropy
+from .rules import PLACEHOLDER_VALUE, is_public_name, is_secret_name, shannon_entropy
 
 ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*[=:]\s*(.*?)\s*$")
 URL_PASSWORD = re.compile(r"^[a-z][a-z0-9+.-]*://[^:/@\s]*:([^@/\s]+)@", re.IGNORECASE)
@@ -68,7 +69,7 @@ def is_weak(value: str) -> bool:
 
 
 def is_secret_value(name: str, value: str, min_length: int) -> bool:
-    if not min_length <= len(value) <= MAX_KNOWN_LENGTH:
+    if not min_length <= len(value) <= MAX_KNOWN_LENGTH or is_public_name(name):
         return False
     if PLACEHOLDER_VALUE.match(value) or NUMBER.match(value) or PLAIN_URL.match(value) or ABSOLUTE_PATH.match(value):
         return False
@@ -153,8 +154,12 @@ def encoded_variants(value: str) -> List[Tuple[str, str]]:
     for encoded in {b64, b64.rstrip("="), base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")}:
         variants.append((encoded, ":base64"))
     escaped = json.dumps(value, ensure_ascii=False)[1:-1]
+    # A regex holding a value (a gitleaks allowlist: hooks\.slack\.com/…), also inside a JSON or TOML string.
+    regex = re.escape(value)
     for encoded, suffix in (
         (quote(value, safe=""), ":urlencoded"),
+        (regex, ":regex-escaped"),
+        (json.dumps(regex)[1:-1], ":regex-escaped"),
         (escaped, ":json-escaped"),
         (json.dumps(value)[1:-1], ":json-escaped"),
         (escaped.replace("/", "\\/"), ":json-escaped"),
@@ -185,11 +190,26 @@ def _read(path: str, max_bytes: int) -> Tuple[Optional[str], Optional[str]]:
 
 
 def expand_sources(patterns: Iterable[str]) -> List[str]:
-    paths = set()
+    """The files patterns match, as glob would find them, but each directory is
+    listed once for all the file names wanted there: globbing every pattern on
+    its own lists the same directories over and over (a quarter of a hook call)."""
+    names_by_dir: Dict[str, List[str]] = {}
     for pattern in patterns:
-        for path in glob.glob(os.path.expanduser(pattern)):
-            if os.path.isfile(path):
-                paths.add(os.path.realpath(path))
+        directory, name = os.path.split(os.path.expanduser(pattern))
+        names_by_dir.setdefault(directory, []).append(name)
+    paths = set()
+    for dir_pattern, names in names_by_dir.items():
+        for directory in glob.glob(dir_pattern) if dir_pattern else [os.curdir]:
+            try:
+                entries = os.listdir(directory)
+            except OSError:
+                continue
+            for entry in entries:
+                # Like glob, a wildcard doesn't match a leading dot.
+                if any(fnmatch.fnmatchcase(entry, name) and (name.startswith(".") or not entry.startswith(".")) for name in names):
+                    path = os.path.join(directory, entry)
+                    if os.path.isfile(path):
+                        paths.add(os.path.realpath(path))
     return sorted(paths)
 
 

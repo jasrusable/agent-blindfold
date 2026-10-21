@@ -11,12 +11,12 @@ Reply shapes are the ones Claude Code and Grok both honour:
 import re
 from typing import Any, Callable, Dict, List, Optional
 
-from .bash import wrap
+from .bash import MARKER, wrap
 from .events import Event
 from .mask import PLACEHOLDER_RE, Finding
 from .rules import PROMPT_BLOCKING_KINDS
 from .runtime import Runtime
-from .structure import mask_value, withhold
+from .structure import mask_value, strings, withhold
 from . import selfguard, shell, transcript
 
 Reply = Optional[Dict[str, Any]]
@@ -86,13 +86,36 @@ def unmaskable_failure(event: Event, findings: List[Finding]) -> Reply:
     }
 
 
+# The report bash.py appends to a failed command, as the last line of its stderr.
+_EXIT_REPORT = re.compile(re.escape(MARKER) + r" (\d+);[^\]\n]*\]\s*$")
+
+
+def failure_note(event: Event) -> Optional[str]:
+    """A wrapped command that failed looks like a success to the agent, with only
+    a line at the end of stderr to say otherwise: say it where it can't be missed."""
+    if event.is_grok or event.tool != "Bash":
+        return None
+    code = next((m.group(1) for text in strings(event.result) for m in [_EXIT_REPORT.search(text)] if m), None)
+    if code is None:
+        return None
+    return (
+        f"This command exited with code {code}: it FAILED (for grep, diff or test, it may only mean no match or a "
+        "difference). blindfold reports it as a success only so its output could be masked."
+    )
+
+
 def post_tool_use(event: Event, rt: Runtime) -> Reply:
     if event.result_key is None:
         return None
     masked, findings = mask_value(rt.masker, event.result)
     if findings and event.name == "PostToolUseFailure" and not event.is_grok:
         return unmaskable_failure(event, findings)
-    note = _context(summarize(findings) if findings else None, None if event.result_key_is_known else DRIFT_WARNING, rt.warning)
+    note = _context(
+        failure_note(event),
+        summarize(findings) if findings else None,
+        None if event.result_key_is_known else DRIFT_WARNING,
+        rt.warning,
+    )
     if not findings:
         return {"hookSpecificOutput": {"hookEventName": event.name, "additionalContext": note}} if note else None
     return {"hookSpecificOutput": {"hookEventName": event.name, "updatedToolOutput": masked, "additionalContext": note}}

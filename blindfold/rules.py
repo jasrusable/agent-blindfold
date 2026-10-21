@@ -28,12 +28,16 @@ class Rule:
     # The match must start a token (checked after matching: a lookbehind here
     # would cost every vendor pattern its fast literal-prefix scan).
     bounded: bool = False
+    # Docs mention the shape in prose (`# a --password flag), else`): on a
+    # comment line, a plain word closing a clause is not a value.
+    prose: bool = False
 
 
 def _rule(
-    kind: str, regex: str, group: int = 0, flags: int = 0, name_group: Optional[int] = None, context: str = "auto", bounded: bool = False
+    kind: str, regex: str, group: int = 0, flags: int = 0, name_group: Optional[int] = None, context: str = "auto", bounded: bool = False,
+    prose: bool = False,
 ) -> Rule:
-    return Rule(kind, re.compile(regex, flags), group, name_group, context, bounded)
+    return Rule(kind, re.compile(regex, flags), group, name_group, context, bounded, prose)
 
 
 def starts_token(text: str, index: int) -> bool:
@@ -80,6 +84,18 @@ def name_segments(name: str):
     return [s.lower() for s in _SEGMENT_SPLIT.split(name.strip("\"'`")) if s]
 
 
+# Still secret under a public-looking name (NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY is a mistake, not a public value).
+_STILL_SECRET = {"service", "private", "role", "admin"}
+
+
+def is_public_name(name: str) -> bool:
+    """EXPO_PUBLIC_*, NEXT_PUBLIC_*, *_PUBLISHABLE_KEY: shipped to clients by design."""
+    segments = name_segments(name)
+    if _STILL_SECRET.intersection(segments) or any(part in s for s in segments for part in _STRONG_PARTS):
+        return False
+    return bool({"public", "publishable"}.intersection(segments))
+
+
 def is_secret_name(name: str, strong: bool = False) -> bool:
     segments = name_segments(name)
     if not segments or segments[-1] in _NOT_A_VALUE_HEAD or _PUBLIC.intersection(segments):
@@ -109,6 +125,15 @@ _CALL = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.]*\(.*\)$")
 _ATTRIBUTE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+$")
 # Code: a call, type, arrow function, generic, object or array literal.
 _CODE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.]*\(|^[(\[{]|=>|<|\bawait\b|\bnew [A-Z]|\btypeof\b")
+# A word closing a clause in prose ("a --password flag), else"), not a value.
+_PROSE_WORD = re.compile(r"^[A-Za-z]+(?:[)\]],?|,)$")
+_COMMENT_LINE = re.compile(r"^\s*(?:#|//|/?\*)")
+
+
+def is_prose_in_comment(value: str, line: str) -> bool:
+    return bool(_COMMENT_LINE.match(line) and _PROSE_WORD.match(value.strip()))
+# A generic type hint (`secrets: List[KnownSecret]`, `Optional[Dict[str, str]]`).
+_TYPE_HINT = re.compile(r"^[A-Za-z_][\w.]*\[[\w\[\], .|]*\]$")
 _SEQUENCE = re.compile(r"^[(\[]\s*(?:[\"'(\[]|[A-Za-z_]\w*\s*,)")
 _QUOTED_ITEMS = re.compile(r"\"((?:[^\"\\]|\\.)*)\"|'([^']*)'")
 _IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$")
@@ -128,8 +153,9 @@ _CODE_LINE = re.compile(r"\b(?:const|let|var|return|function|await|typeof|instan
 def is_placeholder(value: str) -> bool:
     """Whether a value found next to a secret-looking name is clearly not a secret."""
     stripped = value.strip()
-    # Prose punctuation after a stand-in word ("--password value, …") isn't part of it.
-    return len(stripped) < 4 or bool(PLACEHOLDER_VALUE.match(stripped)) or bool(PLACEHOLDER_VALUE.match(stripped.rstrip(".,;:")))
+    # Prose punctuation after a stand-in word ("--password value, …", "(--token <value>)") isn't part of it.
+    candidates = (stripped, stripped.rstrip(".,;:"), stripped.rstrip(".,;:)"))
+    return len(stripped) < 4 or any(PLACEHOLDER_VALUE.match(c) for c in candidates)
 
 
 def is_code_line(line: str) -> bool:
@@ -172,7 +198,7 @@ def is_secretish(value: str, context: str) -> bool:
         if _SEQUENCE.match(stripped):
             return any(is_secretish(m.group(1) or m.group(2) or "", "quoted") for m in _QUOTED_ITEMS.finditer(stripped))
         return not (_CALL.match(stripped) or _ATTRIBUTE.match(stripped))
-    if _CODE.search(stripped) or _VERSION.match(stripped):
+    if _CODE.search(stripped) or _VERSION.match(stripped) or _TYPE_HINT.match(stripped):
         return False
     if _COMMAND.match(stripped) and _COMMAND_MARKER.search(stripped):
         return False
@@ -201,6 +227,11 @@ def _vendor(kind: str, body: str, flags: int = 0) -> Rule:
     return _rule(kind, body + _END, flags=flags, bounded=True)
 
 
+# A URL as it may be written in a regex or a JSON string: hooks\.slack\.com, https:\/\/.
+_DOT = r"\\{0,2}\."
+_SLASH = r"\\{0,2}/"
+
+
 RULES = [
     # A private key, whole or cut short (head, a Read with a limit).
     _rule(
@@ -215,8 +246,14 @@ RULES = [
     _vendor("github-token", r"(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{82})"),
     _vendor("gitlab-token", r"gl(?:pat|ptt|dt|rt|cbt|imt|oas|soat|ft|agent)-[A-Za-z0-9_-]{20,}"),
     _vendor("slack-token", r"xox[abposre]-(?:[0-9]+-)?[A-Za-z0-9-]{10,250}"),
-    _rule("slack-webhook", r"https://hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9/_-]{20,200}"),
-    _rule("discord-webhook", r"https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/[0-9]{17,20}/[A-Za-z0-9_-]{60,80}"),
+    _rule(
+        "slack-webhook",
+        rf"(?:https:{_SLASH}{_SLASH})?hooks{_DOT}slack{_DOT}com{_SLASH}(?:services|workflows|triggers){_SLASH}(?:[A-Za-z0-9_-]|{_SLASH}){{20,200}}",
+    ),
+    _rule(
+        "discord-webhook",
+        rf"https:{_SLASH}{_SLASH}(?:ptb{_DOT}|canary{_DOT})?discord(?:app)?{_DOT}com{_SLASH}api{_SLASH}webhooks{_SLASH}[0-9]{{17,20}}{_SLASH}[A-Za-z0-9_-]{{60,80}}",
+    ),
     _vendor("telegram-bot-token", r"[0-9]{8,10}:AA[A-Za-z0-9_-]{33}"),
     _vendor("stripe-key", r"(?:sk|rk)_(?:live|test|prod)_[A-Za-z0-9]{16,255}"),
     _vendor("stripe-webhook-secret", r"whsec_[A-Za-z0-9+/=]{20,}"),
@@ -321,6 +358,7 @@ RULES = [
         1,
         re.IGNORECASE,
         context="strong",
+        prose=True,
     ),
 ]
 
@@ -342,6 +380,11 @@ _NOT_SECRET_PREFIX = re.compile(r"^(?:sha(?:1|256|384|512)-|h1-|data-|/)", re.IG
 _PREFIXED_HEX = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,11}[-_](?:[A-Za-z0-9]{1,8}[-_])?[0-9a-f]{32,}$")
 
 
+def _ascending_run(token: str, length: int) -> bool:
+    steps = [ord(b) - ord(a) == 1 for a, b in zip(token, token[1:])]
+    return any(all(steps[i : i + length - 1]) for i in range(len(steps) - length + 2))
+
+
 def shannon_entropy(value: str) -> float:
     counts = {}
     for char in value:
@@ -352,6 +395,10 @@ def shannon_entropy(value: str) -> float:
 
 def looks_random(token: str, min_entropy: float) -> bool:
     if _NOT_SECRET_PREFIX.match(token):
+        return False
+    # An alphabet (base32, base58): no repeated character and an ascending run
+    # (ABCDEF). Random tokens almost never have both.
+    if len(set(token)) == len(token) and _ascending_run(token, 6):
         return False
     # Before the pure-hex check: a label like `fc-` is itself made of hex letters.
     if _PREFIXED_HEX.match(token):
