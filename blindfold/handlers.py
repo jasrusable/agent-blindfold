@@ -87,7 +87,7 @@ def unmaskable_failure(event: Event, findings: List[Finding]) -> Reply:
 
 
 # The report bash.py appends to a failed command, as the last line of its stderr.
-_EXIT_REPORT = re.compile(re.escape(MARKER) + r" (\d+);[^\]\n]*\]\s*$")
+_EXIT_REPORT = re.compile(re.escape(MARKER) + r" (\d+|nonzero);[^\]\n]*\]\s*$")
 
 
 def failure_note(event: Event) -> Optional[str]:
@@ -99,7 +99,7 @@ def failure_note(event: Event) -> Optional[str]:
     if code is None:
         return None
     return (
-        f"This command exited with code {code}: it FAILED (for grep, diff or test, it may only mean no match or a "
+        f"This command exited with {'a nonzero code' if code == 'nonzero' else f'code {code}'}: it FAILED (for grep, diff or test, it may only mean no match or a "
         "difference). blindfold reports it as a success only so its output could be masked."
     )
 
@@ -204,9 +204,10 @@ def _wrapped_bash(event: Event, rt: Runtime) -> Reply:
     if event.is_grok or event.tool != "Bash" or not rt.config.wrap_claude_bash or not isinstance(tool_input, dict):
         return None
     command = tool_input.get("command")
-    if not isinstance(command, str) or wrap(command) == command:
+    wrapped = wrap(command, event.cwd) if isinstance(command, str) else None
+    if wrapped is None or wrapped == command:
         return None
-    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {**tool_input, "command": wrap(command)}}}
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {**tool_input, "command": wrapped}}}
 
 
 def user_prompt_submit(event: Event, rt: Runtime) -> Reply:
@@ -286,7 +287,7 @@ def withheld_reply(event: Event) -> Reply:
         # failing command's output couldn't be masked.
         command = event.tool_input.get("command") if isinstance(event.tool_input, dict) else None
         if not event.is_grok and event.tool == "Bash" and isinstance(command, str):
-            reply["hookSpecificOutput"]["updatedInput"] = {**event.tool_input, "command": wrap(command)}
+            reply["hookSpecificOutput"]["updatedInput"] = {**event.tool_input, "command": wrap(command, event.cwd)}
         return reply
     if event.name == "UserPromptSubmit":
         return {"systemMessage": "⚠️ blindfold could not check this prompt for secrets (run `blindfold doctor`). It was sent unchecked."}

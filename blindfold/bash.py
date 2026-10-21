@@ -20,10 +20,21 @@ no longer carries over to the next call. `cd dir && cmd` within one call works.
 The selftest checks through real Claude that failing commands are masked, allow
 rules still match and deny rules are still enforced.
 
+In a worktree-isolated session (EnterWorktree, `claude --worktree`) Claude
+Code also refuses any command that names git together with something it can't
+verify, a subshell or any `$` expansion included (seen on 2.1.306). There a
+git command gets the one form it accepts, `cmd || printf '…' >&2`, which can't
+say the exit code; a git command that form can't hold safely (several lines,
+a heredoc or comment, or `exit`/`set`/`exec`/`trap`/`eval`/`source`) is left
+unwrapped, so if it fails, blindfold can only warn.
+
 Not covered: a command Claude kills (its timeout, or Esc), and `kill $$`.
 Their output goes down the failure path, and blindfold warns the user instead
 (handlers.py). Trapping TERM/INT would change how commands stop when asked to.
 """
+
+import re
+from typing import Optional
 
 MARKER = "[blindfold: exit code"
 _REPORT = (
@@ -41,10 +52,23 @@ def _only_comments(command: str) -> bool:
     return all(not line.strip() or line.strip().startswith("#") for line in command.splitlines())
 
 
-def wrap(command: str) -> str:
+_ISOLATED_WORKTREE = re.compile(r"/\.claude/worktrees/[^/]+/")
+_NAMES_GIT = re.compile(r"(?:^|[\s;&|(`])git(?:\s|$)")
+# What a top-level `cmd || report` can't hold: more than one line, a heredoc, a
+# comment or line continuation, a trailing & or ;, or a builtin that can end
+# the shell before the report runs.
+_NOT_ONE_PLAIN_LINE = re.compile(r"\n|<<|#|\\\s*$|[&;]\s*$|\b(?:exit|exec|set|setopt|trap|eval|source)\b|(?:^|[;&|(]\s*)\.\s")
+_NONZERO_REPORT = f"printf '\\n{MARKER} nonzero; reported as success so its output could be masked]\\n' >&2"
+
+
+def wrap(command: str, cwd: Optional[str] = None) -> str:
     """The command made to exit 0, reporting a failure's code on stderr.
 
     Always wrapped, even when it looks wrapped already: a command crafted to
     look wrapped would otherwise run bare, and wrapping twice is harmless (the
     inner report succeeds, so the outer one says nothing)."""
-    return command if _only_comments(command) else f"{_OPEN}{command}{_CLOSE}"
+    if _only_comments(command):
+        return command
+    if cwd and _ISOLATED_WORKTREE.search(cwd + "/") and _NAMES_GIT.search(command):
+        return command if _NOT_ONE_PLAIN_LINE.search(command) else f"{command} || {_NONZERO_REPORT}"
+    return f"{_OPEN}{command}{_CLOSE}"
