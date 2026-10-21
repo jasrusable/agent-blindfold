@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import unittest
+import unittest.mock
 
 from blindfold.known import KnownSecret, expand_sources, parse_env_text
 from blindfold.mask import Masker, trie_pattern
@@ -138,3 +139,27 @@ class WorktreeGitWrap(unittest.TestCase):
         }
         out = reply(event, Masker(key=KEY))
         self.assertIn("exited with a nonzero code: it FAILED", out["hookSpecificOutput"]["additionalContext"])
+
+    def test_what_that_form_cant_hold_is_refused_not_run_unwrapped(self):
+        def pre(command, cwd):
+            return reply({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd}, Masker(key=KEY))
+
+        denied = pre("git commit -m x\ngit push", self.WT)
+        self.assertEqual(denied["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("single-line commands", denied["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIn("updatedInput", pre("git status", self.WT)["hookSpecificOutput"])
+        self.assertIn("updatedInput", pre("git commit -m x\ngit push", "/r/repo")["hookSpecificOutput"])
+
+
+class LargeTextUsesOnePattern(unittest.TestCase):
+    def test_same_masking_either_side_of_the_budget(self):
+        from blindfold import mask
+
+        values = [corpus.rand(40) for _ in range(50)]
+        m = Masker(known=[KnownSecret(v, f"K{i}_TOKEN") for i, v in enumerate(values)], key=KEY, entropy=False)
+        text = f"x {values[7]} y {values[42]} " + "z" * 1000
+        small, _ = m.mask(text)
+        with unittest.mock.patch.object(mask, "PREFILTER_BUDGET", 0):
+            large, _ = m.mask(text)
+        self.assertEqual(small, large)
+        self.assertNotIn(values[7], large)

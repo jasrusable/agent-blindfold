@@ -11,7 +11,7 @@ Reply shapes are the ones Claude Code and Grok both honour:
 import re
 from typing import Any, Callable, Dict, List, Optional
 
-from .bash import MARKER, wrap
+from .bash import MARKER, unwrappable, wrap
 from .events import Event
 from .mask import PLACEHOLDER_RE, Finding
 from .rules import PROMPT_BLOCKING_KINDS
@@ -198,12 +198,21 @@ def pre_tool_use(event: Event, rt: Runtime) -> Reply:
     return _wrapped_bash(event, rt)
 
 
+UNWRAPPABLE_REASON = (
+    "blindfold: in a worktree session Claude Code only runs a git command written as one plain line, and in that "
+    "form blindfold can't mask a failing command's output if it has several lines, a heredoc, a comment, a trailing "
+    "& or ;, or exit/set/exec/trap/eval/source. Run it as separate single-line commands."
+)
+
+
 def _wrapped_bash(event: Event, rt: Runtime) -> Reply:
     """Claude only: rewrite a Bash command to exit 0 so its output can be masked (see bash.py)."""
     tool_input = event.tool_input
     if event.is_grok or event.tool != "Bash" or not rt.config.wrap_claude_bash or not isinstance(tool_input, dict):
         return None
     command = tool_input.get("command")
+    if isinstance(command, str) and unwrappable(command, event.cwd):
+        return _deny(UNWRAPPABLE_REASON)
     wrapped = wrap(command, event.cwd) if isinstance(command, str) else None
     if wrapped is None or wrapped == command:
         return None

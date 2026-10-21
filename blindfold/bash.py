@@ -25,8 +25,9 @@ Code also refuses any command that names git together with something it can't
 verify, a subshell or any `$` expansion included (seen on 2.1.306). There a
 git command gets the one form it accepts, `cmd || printf '…' >&2`, which can't
 say the exit code; a git command that form can't hold safely (several lines,
-a heredoc or comment, or `exit`/`set`/`exec`/`trap`/`eval`/`source`) is left
-unwrapped, so if it fails, blindfold can only warn.
+a heredoc or comment, or `exit`/`set`/`exec`/`trap`/`eval`/`source`) is
+refused, with a reason asking for single-line commands: unwrapped, a failure's
+output couldn't be masked.
 
 Not covered: a command Claude kills (its timeout, or Esc), and `kill $$`.
 Their output goes down the failure path, and blindfold warns the user instead
@@ -61,6 +62,15 @@ _NOT_ONE_PLAIN_LINE = re.compile(r"\n|<<|#|\\\s*$|[&;]\s*$|\b(?:exit|exec|set|se
 _NONZERO_REPORT = f"printf '\\n{MARKER} nonzero; reported as success so its output could be masked]\\n' >&2"
 
 
+def _git_in_worktree(command: str, cwd: Optional[str]) -> bool:
+    return bool(cwd and _ISOLATED_WORKTREE.search(cwd + "/") and _NAMES_GIT.search(command))
+
+
+def unwrappable(command: str, cwd: Optional[str] = None) -> bool:
+    """A git command in a worktree session that no form the guard accepts can hold."""
+    return _git_in_worktree(command, cwd) and not _only_comments(command) and bool(_NOT_ONE_PLAIN_LINE.search(command))
+
+
 def wrap(command: str, cwd: Optional[str] = None) -> str:
     """The command made to exit 0, reporting a failure's code on stderr.
 
@@ -69,6 +79,6 @@ def wrap(command: str, cwd: Optional[str] = None) -> str:
     inner report succeeds, so the outer one says nothing)."""
     if _only_comments(command):
         return command
-    if cwd and _ISOLATED_WORKTREE.search(cwd + "/") and _NAMES_GIT.search(command):
+    if _git_in_worktree(command, cwd):
         return command if _NOT_ONE_PLAIN_LINE.search(command) else f"{command} || {_NONZERO_REPORT}"
     return f"{_OPEN}{command}{_CLOSE}"

@@ -41,6 +41,10 @@ _FINGERPRINT_BEFORE = re.compile(r"(?:SHA(?:1|256|384|512)|MD5):$", re.IGNORECAS
 _GOOGLE_CLIENT_ID = re.compile(r"[0-9]{6,20}-[a-z0-9]{32}")
 _GOOGLE_CLIENT_SUFFIX = re.compile(r"\.apps\.googleusercontent\.com(?![A-Za-z0-9.-])")
 
+# Characters scanned by the per-value substring tests (about 20ms) before one
+# pattern for every known value is cheaper.
+PREFILTER_BUDGET = 20_000_000
+
 # The trie that matches known values recurses per character; an encoded
 # variant past this is skipped (a value that long is key material, which the
 # private-key rules cover).
@@ -95,9 +99,14 @@ class Masker:
         Building and compiling one for every known value costs ~100ms per hook
         call, while a substring test per value costs well under 1ms on typical
         output, and most output holds none. Every value that could match is in
-        the subset, so the result is the same.
+        the subset, so the result is the same. On large text the searches cost
+        more than one pattern for every value, built once and reused.
         """
-        present = frozenset(value for value in (self._weak_values if weak else self._strong_values) if value in text)
+        values = self._weak_values if weak else self._strong_values
+        if len(text) * len(values) > PREFILTER_BUDGET:
+            present = frozenset(values)
+        else:
+            present = frozenset(value for value in values if value in text)
         if not present:
             return None
         key = (weak, present)
