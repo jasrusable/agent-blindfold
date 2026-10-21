@@ -28,12 +28,16 @@ class Rule:
     # The match must start a token (checked after matching: a lookbehind here
     # would cost every vendor pattern its fast literal-prefix scan).
     bounded: bool = False
+    # Docs mention the shape in prose (`# a --password flag), else`): on a
+    # comment line, a plain word closing a clause is not a value.
+    prose: bool = False
 
 
 def _rule(
-    kind: str, regex: str, group: int = 0, flags: int = 0, name_group: Optional[int] = None, context: str = "auto", bounded: bool = False
+    kind: str, regex: str, group: int = 0, flags: int = 0, name_group: Optional[int] = None, context: str = "auto", bounded: bool = False,
+    prose: bool = False,
 ) -> Rule:
-    return Rule(kind, re.compile(regex, flags), group, name_group, context, bounded)
+    return Rule(kind, re.compile(regex, flags), group, name_group, context, bounded, prose)
 
 
 def starts_token(text: str, index: int) -> bool:
@@ -80,9 +84,16 @@ def name_segments(name: str):
     return [s.lower() for s in _SEGMENT_SPLIT.split(name.strip("\"'`")) if s]
 
 
+# Still secret under a public-looking name (NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY is a mistake, not a public value).
+_STILL_SECRET = {"service", "private", "role", "admin"}
+
+
 def is_public_name(name: str) -> bool:
     """EXPO_PUBLIC_*, NEXT_PUBLIC_*, *_PUBLISHABLE_KEY: shipped to clients by design."""
-    return bool(_PUBLIC.intersection(name_segments(name)))
+    segments = name_segments(name)
+    if _STILL_SECRET.intersection(segments) or any(part in s for s in segments for part in _STRONG_PARTS):
+        return False
+    return bool({"public", "publishable"}.intersection(segments))
 
 
 def is_secret_name(name: str, strong: bool = False) -> bool:
@@ -116,6 +127,11 @@ _ATTRIBUTE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*
 _CODE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.]*\(|^[(\[{]|=>|<|\bawait\b|\bnew [A-Z]|\btypeof\b")
 # A word closing a clause in prose ("a --password flag), else"), not a value.
 _PROSE_WORD = re.compile(r"^[A-Za-z]+(?:[)\]],?|,)$")
+_COMMENT_LINE = re.compile(r"^\s*(?:#|//|/?\*)")
+
+
+def is_prose_in_comment(value: str, line: str) -> bool:
+    return bool(_COMMENT_LINE.match(line) and _PROSE_WORD.match(value.strip()))
 # A generic type hint (`secrets: List[KnownSecret]`, `Optional[Dict[str, str]]`).
 _TYPE_HINT = re.compile(r"^[A-Za-z_][\w.]*\[[\w\[\], .|]*\]$")
 _SEQUENCE = re.compile(r"^[(\[]\s*(?:[\"'(\[]|[A-Za-z_]\w*\s*,)")
@@ -181,7 +197,7 @@ def is_secretish(value: str, context: str) -> bool:
         # quoted items, each as a quoted value.
         if _SEQUENCE.match(stripped):
             return any(is_secretish(m.group(1) or m.group(2) or "", "quoted") for m in _QUOTED_ITEMS.finditer(stripped))
-        return not (_CALL.match(stripped) or _ATTRIBUTE.match(stripped) or _PROSE_WORD.match(stripped))
+        return not (_CALL.match(stripped) or _ATTRIBUTE.match(stripped))
     if _CODE.search(stripped) or _VERSION.match(stripped) or _TYPE_HINT.match(stripped):
         return False
     if _COMMAND.match(stripped) and _COMMAND_MARKER.search(stripped):
@@ -342,6 +358,7 @@ RULES = [
         1,
         re.IGNORECASE,
         context="strong",
+        prose=True,
     ),
 ]
 
@@ -363,6 +380,11 @@ _NOT_SECRET_PREFIX = re.compile(r"^(?:sha(?:1|256|384|512)-|h1-|data-|/)", re.IG
 _PREFIXED_HEX = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,11}[-_](?:[A-Za-z0-9]{1,8}[-_])?[0-9a-f]{32,}$")
 
 
+def _ascending_run(token: str, length: int) -> bool:
+    steps = [ord(b) - ord(a) == 1 for a, b in zip(token, token[1:])]
+    return any(all(steps[i : i + length - 1]) for i in range(len(steps) - length + 2))
+
+
 def shannon_entropy(value: str) -> float:
     counts = {}
     for char in value:
@@ -374,9 +396,9 @@ def shannon_entropy(value: str) -> float:
 def looks_random(token: str, min_entropy: float) -> bool:
     if _NOT_SECRET_PREFIX.match(token):
         return False
-    # No repeated character: an alphabet (base32, bech32), not a token. 32
-    # random base62 characters are all distinct with odds of about 1 in 3000.
-    if len(set(token)) == len(token):
+    # An alphabet (base32, base58): no repeated character and an ascending run
+    # (ABCDEF). Random tokens almost never have both.
+    if len(set(token)) == len(token) and _ascending_run(token, 6):
         return False
     # Before the pure-hex check: a label like `fc-` is itself made of hex letters.
     if _PREFIXED_HEX.match(token):

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Match, Optional, Pattern, Tuple
 
 from .known import KnownSecret, encoded_variants
-from .rules import HIGH_ENTROPY_TOKEN, RULES, Rule, is_code_line, is_placeholder, is_secret_name, is_secretish, looks_random, starts_token
+from .rules import HIGH_ENTROPY_TOKEN, RULES, Rule, is_code_line, is_placeholder, is_prose_in_comment, is_secret_name, is_secretish, looks_random, starts_token
 
 # The exact shape of a placeholder blindfold emits. The write guard and idempotence
 # rely on it, so change it only with both.
@@ -37,7 +37,9 @@ class Finding:
     weak: bool = False
 
 _FINGERPRINT_BEFORE = re.compile(r"(?:SHA(?:1|256|384|512)|MD5):$", re.IGNORECASE)
-_HOSTNAME_AFTER = re.compile(r"(?:\.[a-z0-9-]{1,63}){1,4}\.[a-z]{2,24}(?![A-Za-z0-9])")
+# Public by design: a Google OAuth client id (<digits>-<32 alnum>.apps.googleusercontent.com).
+_GOOGLE_CLIENT_ID = re.compile(r"[0-9]{6,20}-[a-z0-9]{32}")
+_GOOGLE_CLIENT_SUFFIX = re.compile(r"\.apps\.googleusercontent\.com(?![A-Za-z0-9.-])")
 
 # The trie that matches known values recurses per character; an encoded
 # variant past this is skipped (a value that long is key material, which the
@@ -171,10 +173,10 @@ class Masker:
             before = match.string[match.start() - 1 : match.start()]
             if ("/" in value and before in (".", "/", ":")) or before == "#":
                 return None
-            # A key fingerprint (SHA256:…) or a hostname label (<id>.apps.googleusercontent.com).
+            # A key fingerprint (SHA256:…) or a Google OAuth client id.
             if _FINGERPRINT_BEFORE.search(match.string, max(0, match.start() - 8), match.start()):
                 return None
-            if _HOSTNAME_AFTER.match(match.string, match.end()):
+            if _GOOGLE_CLIENT_ID.fullmatch(value) and _GOOGLE_CLIENT_SUFFIX.match(match.string, match.end()):
                 return None
             return hide("high-entropy", value)
 
@@ -197,6 +199,8 @@ class Masker:
         inner = value[1:-1] if quote else value
         context = "strong" if strong else "quoted" if quote or _whole_line(match, rule.group) else "bare"
         if context == "bare" and _in_code(match, rule.group):
+            return None
+        if rule.prose and is_prose_in_comment(inner, match.string[slice(*_line_of(match))]):
             return None
         if inner in self._allow or not is_secretish(inner, context):
             return None

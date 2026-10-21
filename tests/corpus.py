@@ -155,6 +155,9 @@ MUST_MASK = [
     (j('"url": "https:\\/\\/hooks.slack.com\\/services\\/', SLACK_HOOK.replace("/", "\\/"), '"'), SLACK_HOOK.split("/")[-1]),
     ("mysql --password Summer2024, -h db", "Summer2024"),
     ("tool --api-key hunter2xyz)", "hunter2xyz"),
+    # Exemptions stay narrow: prose only in comments, hostnames only Google's client ids.
+    ("run --password summer), then", "summer"),
+    (j("host ", GENERIC_TOKEN, ".tunnel.example.com is up"), GENERIC_TOKEN),
     (j("https:\\/\\/discord.com\\/api\\/webhooks\\/", "123456789012345678", "\\/", DISCORD_HOOK), DISCORD_HOOK),
 ]
 

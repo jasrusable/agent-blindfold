@@ -34,7 +34,16 @@ class PublicEnvNames(unittest.TestCase):
 
     def test_secret_names_still_are(self):
         value = corpus.rand(40)
-        self.assertEqual([s.name for s in parse_env_text(f"MIXPANEL_API_SECRET={value}", 8)], ["MIXPANEL_API_SECRET"])
+        for name in ("MIXPANEL_API_SECRET", "NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY", "PUBLIC_KEY_PASSPHRASE", "SAMPLE_API_KEY"):
+            self.assertEqual([s.name for s in parse_env_text(f"{name}={value}", 8)], [name])
+
+
+class Alphabets(unittest.TestCase):
+    def test_distinct_characters_alone_are_not_enough(self):
+        from blindfold.rules import looks_random
+
+        self.assertTrue(looks_random("qpzry9x8gf2tvdw0s3jn54khce6mUA7L", 4.2))
+        self.assertFalse(looks_random("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", 4.2))
 
 
 class LazyKnownPattern(unittest.TestCase):
