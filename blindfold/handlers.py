@@ -11,7 +11,7 @@ Reply shapes are the ones Claude Code and Grok both honour:
 import re
 from typing import Any, Callable, Dict, List, Optional
 
-from .bash import MARKER, wrap
+from .bash import MARKER, unwrappable, wrap
 from .events import Event
 from .mask import PLACEHOLDER_RE, Finding
 from .rules import PROMPT_BLOCKING_KINDS
@@ -33,6 +33,7 @@ Placeholder: <blindfold kind=env:STRIPE_API_KEY len=107 id=3f9a1c>
 - len: the value's length. id: a keyed fingerprint, same value same id, not reversible.
 - <blindfold: output withheld ...> means the masker failed and hid everything. The tool did run; don't re-run it blindly.
 - "[blindfold: exit code N; reported as success so its output could be masked]" at the end of a command's output means the command FAILED with exit code N. Treat it as a failure.
+- In Claude Code each Bash command runs in a subshell, so a `cd` doesn't carry over to the next command. Use absolute paths, or `cd dir && …` within one command.
 
 Rules:
 0. You are the first line of defence, blindfold is the safety net: be cautious with anything that is or might be sensitive, work blind by default, and don't read secret files, dump env vars or print config unless the task needs it (prefer commands that report names, presence or lengths). Masking can miss things.
@@ -86,7 +87,7 @@ def unmaskable_failure(event: Event, findings: List[Finding]) -> Reply:
 
 
 # The report bash.py appends to a failed command, as the last line of its stderr.
-_EXIT_REPORT = re.compile(re.escape(MARKER) + r" (\d+);[^\]\n]*\]\s*$")
+_EXIT_REPORT = re.compile(re.escape(MARKER) + r" (\d+|nonzero);[^\]\n]*\]\s*$")
 
 
 def failure_note(event: Event) -> Optional[str]:
@@ -98,7 +99,7 @@ def failure_note(event: Event) -> Optional[str]:
     if code is None:
         return None
     return (
-        f"This command exited with code {code}: it FAILED (for grep, diff or test, it may only mean no match or a "
+        f"This command exited with {'a nonzero code' if code == 'nonzero' else f'code {code}'}: it FAILED (for grep, diff or test, it may only mean no match or a "
         "difference). blindfold reports it as a success only so its output could be masked."
     )
 
@@ -197,15 +198,25 @@ def pre_tool_use(event: Event, rt: Runtime) -> Reply:
     return _wrapped_bash(event, rt)
 
 
+UNWRAPPABLE_REASON = (
+    "blindfold: in a worktree session Claude Code only runs a git command written as one plain line, and in that "
+    "form blindfold can't mask a failing command's output if it has several lines, a heredoc, a comment, a trailing "
+    "& or ;, or exit/set/exec/trap/eval/source. Run it as separate single-line commands."
+)
+
+
 def _wrapped_bash(event: Event, rt: Runtime) -> Reply:
     """Claude only: rewrite a Bash command to exit 0 so its output can be masked (see bash.py)."""
     tool_input = event.tool_input
     if event.is_grok or event.tool != "Bash" or not rt.config.wrap_claude_bash or not isinstance(tool_input, dict):
         return None
     command = tool_input.get("command")
-    if not isinstance(command, str) or wrap(command) == command:
+    if isinstance(command, str) and unwrappable(command, event.cwd):
+        return _deny(UNWRAPPABLE_REASON)
+    wrapped = wrap(command, event.cwd) if isinstance(command, str) else None
+    if wrapped is None or wrapped == command:
         return None
-    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {**tool_input, "command": wrap(command)}}}
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {**tool_input, "command": wrapped}}}
 
 
 def user_prompt_submit(event: Event, rt: Runtime) -> Reply:
@@ -285,7 +296,7 @@ def withheld_reply(event: Event) -> Reply:
         # failing command's output couldn't be masked.
         command = event.tool_input.get("command") if isinstance(event.tool_input, dict) else None
         if not event.is_grok and event.tool == "Bash" and isinstance(command, str):
-            reply["hookSpecificOutput"]["updatedInput"] = {**event.tool_input, "command": wrap(command)}
+            reply["hookSpecificOutput"]["updatedInput"] = {**event.tool_input, "command": wrap(command, event.cwd)}
         return reply
     if event.name == "UserPromptSubmit":
         return {"systemMessage": "⚠️ blindfold could not check this prompt for secrets (run `blindfold doctor`). It was sent unchecked."}

@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import unittest
+import unittest.mock
 
 from blindfold.known import KnownSecret, expand_sources, parse_env_text
 from blindfold.mask import Masker, trie_pattern
@@ -96,3 +97,69 @@ class FailureNote(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorktreeGitWrap(unittest.TestCase):
+    """Claude Code's worktree guard refuses git next to a subshell or any `$`."""
+
+    WT = "/r/.claude/worktrees/x"
+
+    def test_git_in_an_isolated_worktree_gets_a_plain_or_report(self):
+        from blindfold.bash import wrap
+
+        for command in ("git status --short", "git log | head -3", "cd a && git diff"):
+            wrapped = wrap(command, self.WT)
+            self.assertTrue(wrapped.startswith(command + " || printf '"), wrapped)
+            self.assertNotIn("$", wrapped[len(command):])
+            self.assertNotIn("(", wrapped[len(command):])
+
+    def test_what_that_form_cant_hold_is_left_alone_and_the_rest_is_unchanged(self):
+        from blindfold.bash import wrap
+
+        for command in ("git commit -m x\ngit push", "git log # note", "exit 3; git x", "git fetch &", "set -e; git pull"):
+            self.assertEqual(wrap(command, self.WT), command)
+        self.assertEqual(wrap("pwd", self.WT), wrap("pwd"))
+        self.assertEqual(wrap("git status", "/r/repo"), wrap("git status"))
+        self.assertTrue(wrap("echo digit", self.WT).startswith("(\n"))
+
+    def test_a_failure_is_reported_and_exits_zero_in_both_shells(self):
+        import subprocess
+
+        from blindfold.bash import wrap
+
+        for shell in ("zsh", "bash"):
+            proc = subprocess.run([shell, "-c", wrap("git --no-such-flag", self.WT)], capture_output=True, text=True, timeout=20)
+            self.assertEqual(proc.returncode, 0, shell)
+            self.assertIn("[blindfold: exit code nonzero;", proc.stderr, shell)
+
+    def test_the_failure_note_reads_a_nonzero_report(self):
+        event = {
+            "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {},
+            "tool_response": {"stdout": "", "stderr": "x\n[blindfold: exit code nonzero; reported as success so its output could be masked]\n"},
+        }
+        out = reply(event, Masker(key=KEY))
+        self.assertIn("exited with a nonzero code: it FAILED", out["hookSpecificOutput"]["additionalContext"])
+
+    def test_what_that_form_cant_hold_is_refused_not_run_unwrapped(self):
+        def pre(command, cwd):
+            return reply({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd}, Masker(key=KEY))
+
+        denied = pre("git commit -m x\ngit push", self.WT)
+        self.assertEqual(denied["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("single-line commands", denied["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIn("updatedInput", pre("git status", self.WT)["hookSpecificOutput"])
+        self.assertIn("updatedInput", pre("git commit -m x\ngit push", "/r/repo")["hookSpecificOutput"])
+
+
+class LargeTextUsesOnePattern(unittest.TestCase):
+    def test_same_masking_either_side_of_the_budget(self):
+        from blindfold import mask
+
+        values = [corpus.rand(40) for _ in range(50)]
+        m = Masker(known=[KnownSecret(v, f"K{i}_TOKEN") for i, v in enumerate(values)], key=KEY, entropy=False)
+        text = f"x {values[7]} y {values[42]} " + "z" * 1000
+        small, _ = m.mask(text)
+        with unittest.mock.patch.object(mask, "PREFILTER_BUDGET", 0):
+            large, _ = m.mask(text)
+        self.assertEqual(small, large)
+        self.assertNotIn(values[7], large)
