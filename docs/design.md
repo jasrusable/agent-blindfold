@@ -23,7 +23,8 @@ Detection has three layers:
    appears, and so are its base64, URL-encoded, JSON-escaped and regex-escaped
    forms, its Unicode NFC/NFD forms, and either case of a hex value. Values
    under a `PUBLIC`/`PUBLISHABLE` name (`EXPO_PUBLIC_*`) ship to clients, so
-   they don't count. The regex is built per call from only the values that
+   they don't count, unless the name also says secret, password, service,
+   private, role or admin. The regex is built per call from only the values that
    occur in the text, usually none, which keeps a hook call around 50ms.
 2. **Rules.** Vendor formats (Stripe, GitHub, AWS, Slack, Anthropic, OpenAI,
    Google, Sentry, PEM private keys, JWTs, and more) plus context: `NAME=value`
@@ -31,8 +32,9 @@ Detection has three layers:
    Names are judged segment by segment, so `STRIPE_SECRET_KEY` counts but
    `max_tokens` and `TOKEN_URL` don't.
 3. **Entropy.** Long random-looking tokens no rule named, except alphabets (no
-   repeated character), hostname labels and `SHA256:` key fingerprints. Bare hex
-   is never judged by entropy (it can't be told from a hash).
+   repeated character and an `ABCDEF`-style run), Google OAuth client ids and
+   `SHA256:` key fingerprints. Bare hex is never judged by entropy (it can't be
+   told from a hash).
 
 It **fails closed** after a call: if masking fails, or runs past its deadline
 in a child process that is then killed, the output is withheld rather than
