@@ -58,6 +58,9 @@ SENTRY_DSN_KEY = hexs(32)
 SENTRY_DSN = j("https://", SENTRY_DSN_KEY, "@o123456.ingest.us.sentry.io/4507")
 GENERIC_TOKEN = rand(48)
 BCRYPT = j("$2b$", "12$", rand(53, ALNUM + "./"))
+SLACK_HOOK = j("T", rand(10, string.ascii_uppercase + string.digits), "/B", rand(10, string.ascii_uppercase + string.digits), "/", rand(24))
+DISCORD_HOOK = rand(68, ALNUM + "_-")
+BASE58 = "".join(c for c in ALNUM if c not in "0OIl")
 
 # (text, the secret that must disappear from it)
 MUST_MASK = [
@@ -147,10 +150,27 @@ MUST_MASK = [
     ("DB_PASSWORD=12345678", "12345678"),
     # Review nit: a token right after a literal \n in JSON text.
     (j('{"msg": "line\\n', GITHUB_PAT, '"}'), GITHUB_PAT),
+    # In the wild: webhooks in a gitleaks allowlist (regex) and in JSON reached the model.
+    (j("regexes = ['''hooks\\.slack\\.com/services/", SLACK_HOOK, "''']"), SLACK_HOOK.split("/")[-1]),
+    (j('"url": "https:\\/\\/hooks.slack.com\\/services\\/', SLACK_HOOK.replace("/", "\\/"), '"'), SLACK_HOOK.split("/")[-1]),
+    ("mysql --password Summer2024, -h db", "Summer2024"),
+    ("tool --api-key hunter2xyz)", "hunter2xyz"),
+    (j("https:\\/\\/discord.com\\/api\\/webhooks\\/", "123456789012345678", "\\/", DISCORD_HOOK), DISCORD_HOOK),
 ]
 
 # Ordinary output that must come back unchanged.
 MUST_NOT_MASK = [
+    # In the wild: type hints, alphabets, OAuth client ids, key fingerprints, doc comments.
+    "    secrets: List[KnownSecret]",
+    "    tokens: Optional[Dict[str, str]]",
+    f'BASE32 = "{string.ascii_uppercase}234567"',
+    f"ALPHABET = '{BASE58}'",
+    f"client_id={rand(12, string.digits)}-{rand(32, string.ascii_lowercase + string.digits)}.apps.googleusercontent.com",
+    f"256 SHA256:{rand(43, ALNUM + '+/')} me@laptop (ED25519)",
+    "    # line, a --password <value>), else judged by quoting.",
+    "    # (a NAME=value line, a --password flag), else judged by quoting.",
+    "    - a --password value, a name/value pair",
+    "    # Its value can be a stand-in: ?token=${resetToken}),",
     "commit 3f9a1c2b7d4e5f60718293a4b5c6d7e8f9012345",
     f"sha256:{hexs(64)}",
     "request_id=1b3261aa-e6e0-066c-eaf2-38707e223977",
