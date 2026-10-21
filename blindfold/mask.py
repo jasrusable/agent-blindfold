@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Match, Optional, Pattern, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Match, Optional, Pattern, Tuple
 
 from .known import KnownSecret, encoded_variants
 from .rules import HIGH_ENTROPY_TOKEN, RULES, Rule, is_code_line, is_placeholder, is_secret_name, is_secretish, looks_random, starts_token
@@ -35,6 +35,9 @@ class Finding:
     fingerprint: str
     # From a word-like known value: masked, but not a reason to refuse or alarm.
     weak: bool = False
+
+_FINGERPRINT_BEFORE = re.compile(r"(?:SHA(?:1|256|384|512)|MD5):$", re.IGNORECASE)
+_HOSTNAME_AFTER = re.compile(r"(?:\.[a-z0-9-]{1,63}){1,4}\.[a-z]{2,24}(?![A-Za-z0-9])")
 
 # The trie that matches known values recurses per character; an encoded
 # variant past this is skipped (a value that long is key material, which the
@@ -69,12 +72,9 @@ class Masker:
                 if len(variant) <= MAX_VARIANT_LENGTH:
                     (weak if secret.weak else names).setdefault(variant, secret.name + suffix)
         self._known_names = {**weak, **names}
-        self._weak_values = set(weak) - set(names)
-        self._known_re: Optional[Pattern[str]] = re.compile(trie_pattern(names)) if names else None
-        # Word-like values only as whole words, so one doesn't hide part of a longer word.
-        self._weak_re: Optional[Pattern[str]] = (
-            re.compile(r"(?<![A-Za-z0-9])(?:" + trie_pattern(weak) + r")(?![A-Za-z0-9])") if weak else None
-        )
+        self._strong_values = list(names)
+        self._weak_values = [value for value in weak if value not in names]
+        self._patterns: Dict[Tuple[bool, FrozenSet[str]], Pattern[str]] = {}
 
     @property
     def known_count(self) -> int:
@@ -86,6 +86,24 @@ class Masker:
     def placeholder(self, kind: str, value: str) -> str:
         safe_kind = re.sub(r"[^A-Za-z0-9:_.-]", "_", kind)[:80]
         return f"<blindfold kind={safe_kind} len={len(value)} id={self.fingerprint(value)}>"
+
+    def _known_pattern(self, text: str, weak: bool) -> Optional[Pattern[str]]:
+        """A regex for just the known values that occur in text, or None.
+
+        Building and compiling one for every known value costs ~100ms per hook
+        call, while a substring test per value costs well under 1ms on typical
+        output, and most output holds none. Every value that could match is in
+        the subset, so the result is the same.
+        """
+        present = frozenset(value for value in (self._weak_values if weak else self._strong_values) if value in text)
+        if not present:
+            return None
+        key = (weak, present)
+        if key not in self._patterns:
+            body = trie_pattern(present)
+            # Word-like values only as whole words, so one doesn't hide part of a longer word.
+            self._patterns[key] = re.compile(r"(?<![A-Za-z0-9])(?:" + body + r")(?![A-Za-z0-9])" if weak else body)
+        return self._patterns[key]
 
     def mask(self, text: str) -> Tuple[str, List[Finding]]:
         return self._mask(text, keep_existing=True)
@@ -128,10 +146,10 @@ class Masker:
             placeholders.append(self.placeholder(kind, value))
             return f"{_OPEN}{len(placeholders) - 1}{_CLOSE}"
 
-        if self._known_re is not None:
-            text = _replace(self._known_re, text, 0, lambda m: hide("env:" + self._known_names[m.group(0)], m.group(0)))
-        if self._weak_re is not None:
-            text = _replace(self._weak_re, text, 0, lambda m: hide("env:" + self._known_names[m.group(0)], m.group(0), weak=True))
+        for weak in (False, True):
+            known_re = self._known_pattern(text, weak)
+            if known_re is not None:
+                text = _replace(known_re, text, 0, lambda m, w=weak: hide("env:" + self._known_names[m.group(0)], m.group(0), weak=w))
 
         for rule in self._rules:
             text = _replace(rule.pattern, text, rule.group, lambda m, r=rule: self._rule_hit(r, m, hide))
@@ -152,6 +170,11 @@ class Masker:
             # (owasp.org/Top10/A03_2021-Injection); one after `#` is an anchor.
             before = match.string[match.start() - 1 : match.start()]
             if ("/" in value and before in (".", "/", ":")) or before == "#":
+                return None
+            # A key fingerprint (SHA256:…) or a hostname label (<id>.apps.googleusercontent.com).
+            if _FINGERPRINT_BEFORE.search(match.string, max(0, match.start() - 8), match.start()):
+                return None
+            if _HOSTNAME_AFTER.match(match.string, match.end()):
                 return None
             return hide("high-entropy", value)
 

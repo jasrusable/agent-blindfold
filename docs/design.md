@@ -20,14 +20,19 @@ Detection has three layers:
    real secret files (`.env`, `.env.local`, `.env.production` and so on;
    templates like `.env.sample` are deliberately excluded) and the process
    environment on every call. Any of those values is masked wherever it
-   appears, and so are its base64, URL-encoded and JSON-escaped forms, its
-   Unicode NFC/NFD forms, and either case of a hex value.
+   appears, and so are its base64, URL-encoded, JSON-escaped and regex-escaped
+   forms, its Unicode NFC/NFD forms, and either case of a hex value. Values
+   under a `PUBLIC`/`PUBLISHABLE` name (`EXPO_PUBLIC_*`) ship to clients, so
+   they don't count. The regex is built per call from only the values that
+   occur in the text, usually none, which keeps a hook call around 50ms.
 2. **Rules.** Vendor formats (Stripe, GitHub, AWS, Slack, Anthropic, OpenAI,
    Google, Sentry, PEM private keys, JWTs, and more) plus context: `NAME=value`
    lines, `"password": "…"`, `--token …`, auth headers, credentials in URLs.
    Names are judged segment by segment, so `STRIPE_SECRET_KEY` counts but
    `max_tokens` and `TOKEN_URL` don't.
-3. **Entropy.** Long random-looking tokens no rule named.
+3. **Entropy.** Long random-looking tokens no rule named, except alphabets (no
+   repeated character), hostname labels and `SHA256:` key fingerprints. Bare hex
+   is never judged by entropy (it can't be told from a hash).
 
 It **fails closed** after a call: if masking fails, or runs past its deadline
 in a child process that is then killed, the output is withheld rather than
@@ -44,7 +49,8 @@ Claude Code won't let a hook replace the output of a tool call that failed.
 That would leave `cat .env; exit 1` or a crashing script that dumps its config
 unmasked. So blindfold rewrites each Bash command to exit 0 and report the real exit
 code on stderr as `[blindfold: exit code N; …]`, which sends its output down the
-success path that blindfold can mask.
+success path that blindfold can mask. The masking step then tells the agent
+plainly that the command failed, so a line at the end of stderr isn't all it has.
 - A plain command runs in a `{ … }` group, so `cd` still carries over to the next call.
 - A command that could end the shell itself (`exit`, `exec`, `set -e`) runs in a
   subshell, and `set -e` keeps working.
