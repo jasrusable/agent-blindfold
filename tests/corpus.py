@@ -61,6 +61,8 @@ BCRYPT = j("$2b$", "12$", rand(53, ALNUM + "./"))
 SLACK_HOOK = j("T", rand(10, string.ascii_uppercase + string.digits), "/B", rand(10, string.ascii_uppercase + string.digits), "/", rand(24))
 DISCORD_HOOK = rand(68, ALNUM + "_-")
 BASE58 = "".join(c for c in ALNUM if c not in "0OIl")
+DRIVE_ID = j("1", rand(43))
+ID_LIKE_SECRET = rand(40)
 
 # (text, the secret that must disappear from it)
 MUST_MASK = [
@@ -155,6 +157,11 @@ MUST_MASK = [
     (j('"url": "https:\\/\\/hooks.slack.com\\/services\\/', SLACK_HOOK.replace("/", "\\/"), '"'), SLACK_HOOK.split("/")[-1]),
     ("mysql --password Summer2024, -h db", "Summer2024"),
     ("tool --api-key hunter2xyz)", "hunter2xyz"),
+    # Id fields are identifiers, unless the name also says secret or session.
+    (j('{"session_id": "', ID_LIKE_SECRET, '"}'), ID_LIKE_SECRET),
+    (j('{"client_secret_id": "', ID_LIKE_SECRET, '"}'), ID_LIKE_SECRET),
+    (j("api_key_id: ", ID_LIKE_SECRET), ID_LIKE_SECRET),
+    (j('{"id": "', STRIPE_LIVE, '"}'), STRIPE_LIVE),
     # Exemptions stay narrow: prose only in comments, hostnames only Google's client ids.
     ("run --password summer), then", "summer"),
     (j("host ", GENERIC_TOKEN, ".tunnel.example.com is up"), GENERIC_TOKEN),
@@ -163,6 +170,10 @@ MUST_MASK = [
 
 # Ordinary output that must come back unchanged.
 MUST_NOT_MASK = [
+    # In the wild: a Drive upload's file id; ids of other APIs.
+    f'{{"kind": "drive#file", "id": "{DRIVE_ID}", "name": "mockup.png"}}',
+    f'"presentationId": "{rand(44)}",',
+    f"file_id={rand(33)}",
     # In the wild: type hints, alphabets, OAuth client ids, key fingerprints, doc comments.
     "    secrets: List[KnownSecret]",
     "    tokens: Optional[Dict[str, str]]",

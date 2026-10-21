@@ -88,6 +88,16 @@ def name_segments(name: str):
 _STILL_SECRET = {"service", "private", "role", "admin"}
 
 
+def is_id_name(name: str) -> bool:
+    """fileId, presentationId, file_id: an identifier, unless the rest of the
+    name says secret (api_key_id, client_secret_id) or session (a credential)."""
+    segments = name_segments(name)
+    if len(segments) < 1 or segments[-1] not in ("id", "ids") or "session" in segments:
+        return False
+    rest = segments[:-1]
+    return not rest or not is_secret_name("_".join(rest), strong=True)
+
+
 def is_public_name(name: str) -> bool:
     """EXPO_PUBLIC_*, NEXT_PUBLIC_*, *_PUBLISHABLE_KEY: shipped to clients by design."""
     segments = name_segments(name)

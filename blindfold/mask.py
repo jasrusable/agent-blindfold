@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Match, Optional, Pattern, Tuple
 
 from .known import KnownSecret, encoded_variants
-from .rules import HIGH_ENTROPY_TOKEN, RULES, Rule, is_code_line, is_placeholder, is_prose_in_comment, is_secret_name, is_secretish, looks_random, starts_token
+from .rules import HIGH_ENTROPY_TOKEN, RULES, Rule, is_code_line, is_id_name, is_placeholder, is_prose_in_comment, is_secret_name, is_secretish, looks_random, starts_token
 
 # The exact shape of a placeholder blindfold emits. The write guard and idempotence
 # rely on it, so change it only with both.
@@ -36,6 +36,7 @@ class Finding:
     # From a word-like known value: masked, but not a reason to refuse or alarm.
     weak: bool = False
 
+_KEY_BEFORE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]{0,63})[\"']?[ \t]*[:=][ \t]*[\"']?$")
 _FINGERPRINT_BEFORE = re.compile(r"(?:SHA(?:1|256|384|512)|MD5):$", re.IGNORECASE)
 # Public by design: a Google OAuth client id (<digits>-<32 alnum>.apps.googleusercontent.com).
 _GOOGLE_CLIENT_ID = re.compile(r"[0-9]{6,20}-[a-z0-9]{32}")
@@ -181,6 +182,10 @@ class Masker:
             # (owasp.org/Top10/A03_2021-Injection); one after `#` is an anchor.
             before = match.string[match.start() - 1 : match.start()]
             if ("/" in value and before in (".", "/", ":")) or before == "#":
+                return None
+            # The value of an id field ("fileId": "1AbC…"): an identifier, like a Drive file id.
+            key = _KEY_BEFORE.search(match.string, max(0, match.start() - 80), match.start())
+            if key and is_id_name(key.group(1)):
                 return None
             # A key fingerprint (SHA256:…) or a Google OAuth client id.
             if _FINGERPRINT_BEFORE.search(match.string, max(0, match.start() - 8), match.start()):
