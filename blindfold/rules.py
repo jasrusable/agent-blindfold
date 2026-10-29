@@ -188,6 +188,24 @@ def _random_identifier(value: str) -> bool:
     )
 
 
+def _random_letters(value: str) -> bool:
+    """A letters-only part that is really a random key (RevenueCat's sk_ keys
+    have no digits). Random base52 is about half capitals; CamelCase words
+    (ReadOnlyAccessToken) capitalise only the start of each word."""
+    size = len(value)
+    return (
+        size >= 20
+        and value.isalpha()
+        and sum(c.isupper() for c in value) >= 0.3 * size
+        and sum(c.islower() for c in value) >= 0.3 * size
+        and shannon_entropy(value) >= 3.8
+    )
+
+
+def has_random_letters(value: str) -> bool:
+    return any(_random_letters(part) for part in re.split(r"[-_./:]+", value))
+
+
 def is_secretish(value: str, context: str) -> bool:
     """Whether a value next to a secret name should be masked.
 
@@ -213,9 +231,9 @@ def is_secretish(value: str, context: str) -> bool:
     if _COMMAND.match(stripped) and _COMMAND_MARKER.search(stripped):
         return False
     if context == "quoted":
-        return not (_SLUG.match(stripped) or _PROSE.match(stripped))
+        return not ((_SLUG.match(stripped) and not has_random_letters(stripped)) or _PROSE.match(stripped))
     if _IDENTIFIER.match(stripped):
-        return _random_identifier(stripped)
+        return _random_identifier(stripped) or has_random_letters(stripped)
     return not _SLUG.match(stripped) and bool(re.search(r"[0-9!@#%^&*+=~?]", stripped))
 
 
@@ -423,7 +441,7 @@ def looks_random(token: str, min_entropy: float) -> bool:
     # Separator-heavy tokens are paths, slugs or identifiers, not keys.
     if token.count("/") / size > 0.08 or (token.count("-") + token.count("_")) / size > 0.15:
         return False
-    if not (any(c.isalpha() for c in token) and any(c.isdigit() for c in token)):
+    if not (any(c.isalpha() for c in token) and any(c.isdigit() for c in token)) and not has_random_letters(token):
         return False
     mixed_case = any(c.islower() for c in token) and any(c.isupper() for c in token)
     # A one-case token in 3+ dash/underscore parts is a slug (heading anchors,

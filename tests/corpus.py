@@ -63,9 +63,16 @@ DISCORD_HOOK = rand(68, ALNUM + "_-")
 BASE58 = "".join(c for c in ALNUM if c not in "0OIl")
 DRIVE_ID = j("1", rand(43))
 ID_LIKE_SECRET = rand(40)
+# In the wild: RevenueCat secret keys are sk_ plus letters only, no digits.
+LETTERS_ONLY_KEY = j("sk", "_", rand(29, string.ascii_letters))
 
 # (text, the secret that must disappear from it)
 MUST_MASK = [
+    # In the wild: `heroku releases:info` prints config vars as padded `NAME: value`.
+    (f"REVENUECAT_SECRET_API_KEY:          {LETTERS_ONLY_KEY}", LETTERS_ONLY_KEY),
+    (f"REVENUECAT_SECRET_API_KEY={LETTERS_ONLY_KEY}", LETTERS_ONLY_KEY),
+    (f'{{"secret": "{LETTERS_ONLY_KEY}"}}', LETTERS_ONLY_KEY),
+    (f"curl -H 'X-Platform: ios' with {LETTERS_ONLY_KEY} failed", LETTERS_ONLY_KEY),
     (f"STRIPE_API_KEY={STRIPE_LIVE}", STRIPE_LIVE),
     (f"key: {STRIPE_RESTRICTED}", STRIPE_RESTRICTED),
     (f"STRIPE_WEBHOOK_SECRET={STRIPE_WEBHOOK}", STRIPE_WEBHOOK),
@@ -170,6 +177,10 @@ MUST_MASK = [
 
 # Ordinary output that must come back unchanged.
 MUST_NOT_MASK = [
+    # Letters-only values that are words, not keys: few capitals, or one case.
+    "token_class: ReadOnlyAccessTokenProviderFactory",
+    'secret_name: "stripe_webhook_signing_secret_staging"',
+    "api_key: ExpiredOrRevokedCredentialsError",
     # In the wild: a Drive upload's file id; ids of other APIs.
     f'{{"kind": "drive#file", "id": "{DRIVE_ID}", "name": "mockup.png"}}',
     f'"presentationId": "{rand(44)}",',
