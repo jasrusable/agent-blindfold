@@ -2,8 +2,9 @@
 """Launcher that runs blindfold from this checkout without installing it.
 
 If blindfold itself can't be imported (a broken checkout or Python), `hook`
-falls back to a stdlib-only reply that withholds tool output, since a crashing
-hook fails open in both agents."""
+falls back to a stdlib-only fail-closed reply: tool output withheld, calls
+refused, prompts blocked, the turn stopped before the model reads output it
+couldn't withhold. A crashing hook would otherwise fail open."""
 
 import json
 import os
@@ -22,6 +23,9 @@ def _withhold(value):
     return value
 
 
+BROKEN = "blindfold is broken (it could not load), so it fails closed. Run `blindfold doctor` and fix what it reports."
+
+
 def fallback_hook():
     print("blindfold: could not load, so it is running in fail-safe mode; run `blindfold doctor`", file=sys.stderr)
     try:
@@ -34,11 +38,16 @@ def fallback_hook():
         reply = {"hookSpecificOutput": {"hookEventName": raw.get("hook_event_name", name), "additionalContext": WITHHELD}}
         if key is not None:
             reply["hookSpecificOutput"]["updatedToolOutput"] = _withhold(raw[key])
-        if name == "PostToolUseFailure":
-            reply["systemMessage"] = "⚠️ blindfold is broken and can't mask failed tool calls; their output may have reached the model."
         sys.stdout.write(json.dumps(reply, ensure_ascii=True))
-    elif name in ("UserPromptSubmit", "SessionStart"):
-        sys.stdout.write(json.dumps({"systemMessage": "⚠️ blindfold is broken (run `blindfold doctor`): tool output is withheld, prompts are unchecked."}))
+    elif name in ("PreToolUse", "pre_tool_use"):
+        reply = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "blindfold: " + BROKEN}}
+        sys.stdout.write(json.dumps(reply, ensure_ascii=True))
+    elif name in ("UserPromptSubmit", "PostToolBatch", "user_prompt_submit"):
+        # PostToolBatch: Claude can't replace a failed call's output, so stop
+        # the turn before the model reads it.
+        sys.stdout.write(json.dumps({"decision": "block", "reason": "⚠️ " + BROKEN}, ensure_ascii=True))
+    elif name == "SessionStart":
+        sys.stdout.write(json.dumps({"systemMessage": "⚠️ " + BROKEN}, ensure_ascii=True))
     return 0
 
 

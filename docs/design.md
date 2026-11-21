@@ -9,7 +9,8 @@ blindfold is a set of hooks the agent runs at fixed points:
 | Hook | What blindfold does |
 |------|----------------|
 | `PostToolUse` | Masks every string in the tool result and sends back **the same structure**. |
-| `PreToolUse` | Refuses a call that would write a placeholder (it would overwrite the real secret) or that carries a known secret's value. In Claude Code it also wraps Bash commands so a failing one can still be masked (see below). |
+| `PreToolUse` | Refuses a call that would write a placeholder (it would overwrite the real secret) or that carries a known secret's value, commands that print a bare secret or dump the environment, reads of secret files, and switching off the commit hooks' secret scan (see [Refusals](#refusals)). In Claude Code it also wraps Bash commands so a failing one can still be masked (see below). |
+| `PostToolBatch` | Claude Code only. Before the next model call, stops the turn if a call's output holds something maskable that no `PostToolUse` hook handled (the hook couldn't start, crashed or timed out, or the call failed in a way Claude won't let a hook mask). |
 | `UserPromptSubmit` | Blocks a prompt containing a known secret's value, or a pasted vendor-format secret (`ghp_…`, `sk_live_…`, a private key), before it reaches the model. |
 | `Stop` | Warns you to rotate a known secret whose value reached the model anyway. |
 | `SessionStart` | Tells the agent what placeholders mean and how to work blind. |
@@ -36,14 +37,56 @@ Detection has three layers:
    `SHA256:` key fingerprints. Bare hex is never judged by entropy (it can't be
    told from a hash).
 
-It **fails closed** after a call: if masking fails, or runs past its deadline
-in a child process that is then killed, the output is withheld rather than
-passed through. It fails *safe* before a call: if that check breaks, the call
-or prompt goes through with a warning (commands naming the 1Password or
-Keychain CLI are still refused), so a bug can't lock anyone out. If blindfold
-can't even load, the launcher's stdlib fallback withholds tool output. When in doubt it
-masks; a false positive costs a little friction, a false negative costs a
-rotation.
+It **fails closed**, at every layer:
+
+- **Inside blindfold:** if masking fails, or runs past its deadline in a child
+  process that is then killed, the output is withheld. If a pre-call check
+  fails, the call is refused; a prompt check, the prompt is blocked; a batch
+  check, the turn is stopped. If blindfold can't even load, the launcher's
+  stdlib fallback does the same.
+- **When the hook itself fails** (can't start, crashes, times out): both agents
+  let the action go ahead by default. `blindfold install` sets
+  `"onFailure": "block"` on the hooks that gate something, so the agent blocks
+  instead (Claude Code 2.1.295+; Grok honours it before calls and prompts). It
+  writes a 60s timeout, well over blindfold's own 22s deadline, and starts an
+  absolute interpreter, so an agent started without `python3` on its PATH still
+  runs the hooks. In Claude Code, `PostToolUse` can't block, so the
+  `PostToolBatch` check is the backstop: each handled call is recorded (under
+  blindfold's config directory, which agents can't write to), and an unhandled
+  call whose output holds anything maskable stops the turn before the model
+  reads it. The output stays in the conversation, so rewind past it or start
+  a new session.
+- `blindfold doctor` exits 1 when an installed hook doesn't fail closed, and
+  `blindfold selftest --agent claude --fail-closed` proves it through real
+  sessions.
+
+A broken config is the one exception: it falls back to the defaults (see
+below), which keep every guard on. When in doubt it masks; a false positive
+costs a little friction, a false negative costs a rotation.
+
+### Refusals
+
+Masking runs on everything, but some calls are refused outright:
+
+- **Bare secrets:** commands whose whole output is a secret (Keychain password
+  reads, `op read`, `*-password` helpers). Configurable as `blocked_commands`.
+- **Environment dumps:** `printenv`, bare `env`/`set`/`export`, `declare -p`,
+  `direnv export|show|dump|exec`, `/proc/*/environ`, and `echo`/`printf` of a
+  credential variable (`$DATABASE_URL`, `$PGPASSWORD`, anything named
+  `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*API_KEY*`). `${#NAME}` and
+  `${NAME:+set}` are fine. `block_env_dumps: false` turns this off.
+- **Secret files:** reading or editing `~/.config/*/*.env`, `.envrc`,
+  `.envrc.local`, `*.p8`, `.netrc` and `.netrc.gpg` with a file tool, or naming
+  them in a command other than `ls`, `test`, `stat`, `chmod`, `touch` or
+  `direnv`. Templates (`.example`, `.sample`, `.template`, `.dist`, `.test`)
+  pass. `extra_protected_files` adds patterns (a glob with a `/` is a path,
+  else a file name); `protect_secret_files: false` drops the defaults.
+  `blindfold install` also writes them as Claude Code `Read(…)`/`Edit(…)` deny
+  rules, recorded in `~/.config/blindfold/install-state.json` so a reinstall
+  updates only its own rules.
+- **Secret-scan bypass:** `--no-verify`, `git commit -n`, `HUSKY=0`, and a
+  `core.hooksPath` override or unset (setting it back to `.husky` is fine).
+  `block_secret_scan_bypass: false` turns this off.
 
 ### Failing commands in Claude Code
 
@@ -147,7 +190,11 @@ exception: there a placeholder is an example.
   "guard_placeholders": true,
   "guard_known_values": true,
   "wrap_claude_bash": true,
-  "blocked_commands": ["\\bop\\s+read\\b"]
+  "blocked_commands": ["\\bop\\s+read\\b"],
+  "block_env_dumps": true,
+  "block_secret_scan_bypass": true,
+  "protect_secret_files": true,
+  "extra_protected_files": ["finwise-*-*.json", "~/projects/FinWise/.env*"]
 }
 ```
 
@@ -199,6 +246,16 @@ Not covered:
   commands report success. Deny and allow rules still apply to wrapped commands
   (the selftest checks both). When you approve a wrapped command and choose
   "don't ask again", check the rule Claude saves.
+- **A failed masking hook in Grok:** Grok honours `onFailure` only on
+  `PreToolUse` and `UserPromptSubmit`, and has no `PostToolBatch`. If the
+  launcher can't start, every call is refused before it runs, so nothing leaks.
+  But if only the `PostToolUse` run fails (killed, or past its 60s timeout),
+  Grok passes the raw output to the model.
+- **After a stopped turn:** `PostToolBatch` stops the turn before the model
+  reads unmasked output, but the output stays in the conversation. Continuing
+  the session sends it; rewind past it or start a new session.
+- **Claude Code before 2.1.295** ignores `onFailure`, so a hook that can't
+  start fails open; `blindfold doctor` warns.
 - **Grok's transcript and scrollback** keep the original output by design. The
   model doesn't see it, but the file on disk has it. Claude Code stores the
   masked version.

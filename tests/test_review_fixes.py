@@ -20,7 +20,7 @@ from blindfold.mask import Masker
 from blindfold.structure import deep_map, withhold
 
 from . import corpus
-from .helpers import reply, runtime
+from .helpers import HAS_ZSH, SHELLS, reply, runtime
 
 M = Masker(known=[KnownSecret(corpus.rand(30), "API_SECRET")], key=b"r" * 32)
 
@@ -46,7 +46,7 @@ class BashWrapper(unittest.TestCase):
         return subprocess.run([shell, "-c", bash.wrap(command)], capture_output=True, text=True, timeout=20)
 
     def test_every_failure_exits_zero_and_reports(self):
-        for shell in ("/bin/zsh", "/bin/bash"):
+        for shell in SHELLS:
             for command, code in self.CASES:
                 with self.subTest(shell=shell, command=command):
                     proc = self.run_wrapped(command, shell)
@@ -59,6 +59,7 @@ class BashWrapper(unittest.TestCase):
                     else:
                         self.assertIn(f"{bash.MARKER} {code};", proc.stderr)
 
+    @unittest.skipUnless(HAS_ZSH, "zsh not installed")
     def test_heredocs_and_cd_work_within_the_call(self):
         with tempfile.TemporaryDirectory() as directory:
             proc = self.run_wrapped(f"cd {directory}\npwd\ncat <<EOF\nhello\nEOF", "/bin/zsh")
@@ -82,7 +83,7 @@ class BashWrapper(unittest.TestCase):
         close = once[len("(\ntrue"):]
         crafted = "(\ntrue\n\n)\nexit 3\n(\ntrue" + close
         self.assertNotEqual(bash.wrap(crafted), crafted)
-        for shell in ("/bin/zsh", "/bin/bash"):
+        for shell in SHELLS:
             for command, code in ((crafted, 3), (bash.wrap("exit 4"), 4)):
                 with self.subTest(shell=shell, command=command[:30]):
                     proc = self.run_wrapped(command, shell)
@@ -91,7 +92,7 @@ class BashWrapper(unittest.TestCase):
                     self.assertIn(f"{bash.MARKER} {code};", proc.stderr)
 
     def test_commands_that_could_end_the_shell_are_still_reported(self):
-        for shell in ("/bin/zsh", "/bin/bash"):
+        for shell in SHELLS:
             for command, code in (
                 ("echo a; false \\", 1),
                 (f"echo '{bash.MARKER}'; exit 2", 2),
@@ -120,7 +121,7 @@ class BashWrapper(unittest.TestCase):
         """Claude Code runs `eval '<command>' && pwd -P >| <cwd file>` and moves
         the next call there. The wrapper must end in success so that note is
         written, whatever the command did; its `cd` no longer reaches it."""
-        for shell in ("/bin/zsh", "/bin/bash"):
+        for shell in SHELLS:
             with tempfile.TemporaryDirectory() as start, tempfile.TemporaryDirectory() as elsewhere:
                 for command in ("exit 3", "set -e; false", "echo ${NOPE_UNSET_VAR:?x}", f"cd {elsewhere}", "true"):
                     with self.subTest(shell=shell, command=command):
@@ -343,14 +344,17 @@ class BlockedCommands(unittest.TestCase):
 
 
 class ThirdReview(unittest.TestCase):
-    def test_pre_check_failure_still_wraps_claude_bash(self):
+    def test_a_failed_pre_check_refuses_the_call_in_both_agents(self):
         from blindfold.events import Event
         from blindfold.handlers import withheld_reply
 
-        out = withheld_reply(Event({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "cat .env; exit 1"}}))
-        self.assertIn(bash.MARKER, out["hookSpecificOutput"]["updatedInput"]["command"])
-        grok = withheld_reply(Event({"hookEventName": "pre_tool_use", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}}))
-        self.assertNotIn("updatedInput", grok["hookSpecificOutput"])
+        for raw in (
+            {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "cat .env; exit 1"}},
+            {"hookEventName": "pre_tool_use", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}},
+        ):
+            out = withheld_reply(Event(raw))
+            self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+            self.assertNotIn("updatedInput", out["hookSpecificOutput"])
 
     def test_an_image_with_a_secret_in_its_text_is_masked_whole(self):
         import base64 as b64
@@ -446,14 +450,13 @@ class FifthReview(unittest.TestCase):
         for text in (f"PRIVATE_KEY={DASHES}BEGIN PRIVATE KEY{DASHES}\n", f'PRIVATE_KEY="{DASHES}BEGIN PRIVATE KEY{DASHES}\n'):
             self.assertEqual(parse_env_text(text, 8), [])
 
-    def test_after_a_failed_check_a_command_naming_op_or_security_is_refused(self):
+    def test_after_a_failed_check_every_command_is_refused(self):
         from blindfold.events import Event
         from blindfold.handlers import withheld_reply
 
-        for command, denied in ((f"{OP} item list", True), (f"{KEYCHAIN} list-keychains", True), ("ls -la", False)):
+        for command in (f"{OP} item list", f"{KEYCHAIN} list-keychains", "ls -la"):
             out = withheld_reply(Event({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}))
-            self.assertEqual(out["hookSpecificOutput"].get("permissionDecision") == "deny", denied, command)
-
+            self.assertEqual(out["hookSpecificOutput"].get("permissionDecision"), "deny", command)
 
 class FourthReview(unittest.TestCase):
     def test_a_masker_that_overruns_its_deadline_is_killed_and_the_output_withheld(self):
@@ -482,7 +485,10 @@ class FourthReview(unittest.TestCase):
                  lambda out: corpus.STRIPE_LIVE not in json.dumps(out) and "file" in out["hookSpecificOutput"]["updatedToolOutput"]),
                 ({"hookEventName": "post_tool_use", "hook_event_name": "PostToolUse", "toolName": "read_file", "toolResult": corpus.STRIPE_LIVE},
                  lambda out: corpus.STRIPE_LIVE not in json.dumps(out)),
-                ({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}}, lambda out: out is None),
+                ({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}},
+                 lambda out: out["hookSpecificOutput"]["permissionDecision"] == "deny"),
+                ({"hook_event_name": "UserPromptSubmit", "prompt": "hi"}, lambda out: out["decision"] == "block"),
+                ({"hook_event_name": "PostToolBatch", "tool_calls": []}, lambda out: out["decision"] == "block"),
             ):
                 done = subprocess.run([sys.executable, os.path.join(root, "bin", "blindfold"), "hook"], input=json.dumps(event),
                                       capture_output=True, text=True, timeout=30)

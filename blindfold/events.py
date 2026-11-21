@@ -86,5 +86,15 @@ class Event:
         return value if isinstance(value, str) else None
 
     @property
+    def session_id(self) -> Optional[str]:
+        value = _first(self.raw, "session_id", "sessionId")
+        return value if isinstance(value, str) else None
+
+    @property
+    def tool_use_id(self) -> Optional[str]:
+        value = _first(self.raw, "tool_use_id", "toolUseId")
+        return value if isinstance(value, str) else None
+
+    @property
     def is_read_only_tool(self) -> bool:
         return self.tool in READ_ONLY_TOOLS

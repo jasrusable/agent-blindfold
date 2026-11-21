@@ -12,6 +12,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python: ["3.9", "3.11", "3.13"]
+        zsh: [true]
+        include:
+          # A Linux box without zsh (like a fresh Debian): its tests must skip, not error.
+          - os: ubuntu-latest
+            python: "3.13"
+            zsh: false
+    name: test (${{ matrix.os }}, ${{ matrix.python }}${{ matrix.zsh && '' || ', no zsh' }})
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -19,8 +26,10 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       # The Bash-wrapper tests run under both bash and zsh (Claude Code uses either).
-      - if: runner.os == 'Linux'
+      - if: runner.os == 'Linux' && matrix.zsh
         run: sudo apt-get install -y -q zsh
+      - if: runner.os == 'Linux' && !matrix.zsh
+        run: "! command -v zsh"
       - run: python -m unittest discover -s tests -t . -v
         env:
           BLINDFOLD_FUZZ_ITERATIONS: "2000"
