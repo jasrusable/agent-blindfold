@@ -1,9 +1,11 @@
 """Process entry point for Claude Code and Grok hooks: stdin event, stdout reply.
 
-A hook that crashes, times out or exits non-zero fails open in both agents: the
-original output reaches the model. So nothing here may raise. Any failure turns
-into the fail-closed reply (output withheld, call or prompt blocked), and input
-that can't be parsed exits 2, which blocks a pending call or prompt.
+A hook that crashes, times out or exits non-zero fails open in both agents
+unless its entry sets "onFailure": "block" (which `blindfold install` writes,
+and which Grok honours only before a call or prompt). So nothing here may
+raise. Any failure turns into the fail-closed reply (output withheld, call
+refused, prompt blocked, turn stopped), and input that can't be parsed exits 2,
+which blocks a pending call or prompt.
 """
 
 import contextlib
@@ -16,11 +18,12 @@ import time
 from typing import Any, Dict, Optional
 
 from .events import Event
-from .handlers import handle, withheld_reply
+from .handlers import FAILED_CHECK_REASON, FAILED_PROMPT_REASON, handle, withheld_reply
 from .runtime import Runtime, load_runtime
 
 
-# Under the agents' hook timeout (30s), which fails open: past this, withhold.
+# Well under the hook timeout `blindfold install` writes (60s): past this, the
+# fail-closed reply, rather than leave it to how the agent treats a timeout.
 BUDGET_SECONDS = 20
 
 
@@ -30,6 +33,26 @@ class _OverBudget(Exception):
 
 def _over_budget(_signum, _frame):
     raise _OverBudget()
+
+
+def last_resort(raw: Dict[str, Any], cause: str) -> Optional[Dict[str, Any]]:
+    """When even the fail-closed reply failed: refuse, block or stop by event name
+    alone. PostToolUse gets nothing: with no output to withhold, PostToolBatch
+    (Claude) stops the turn because the call wasn't recorded as handled."""
+    name = raw.get("hook_event_name")
+    if name == "PreToolUse":
+        reason = FAILED_CHECK_REASON.format(cause=cause)
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}
+    if name in ("UserPromptSubmit", "PostToolBatch"):
+        return {"decision": "block", "reason": FAILED_PROMPT_REASON.format(cause=cause)}
+    return None
+
+
+def _fail_closed(raw: Dict[str, Any], cause: str) -> Optional[Dict[str, Any]]:
+    try:
+        return withheld_reply(Event(raw), cause)
+    except Exception:  # noqa: BLE001
+        return last_resort(raw, cause)
 
 
 def respond(raw: Dict[str, Any], rt: Optional[Runtime] = None) -> Optional[Dict[str, Any]]:
@@ -42,11 +65,9 @@ def respond(raw: Dict[str, Any], rt: Optional[Runtime] = None) -> Optional[Dict[
             signal.alarm(BUDGET_SECONDS)
         return handle(event, rt or load_runtime())
     except BaseException as error:  # noqa: BLE001 - must never fail open, incl. the budget
-        print(f"blindfold: internal error: {type(error).__name__}", file=sys.stderr)
-        try:
-            return withheld_reply(event)
-        except Exception:  # noqa: BLE001
-            return None
+        cause = "it ran past its time budget" if isinstance(error, _OverBudget) else f"internal error: {type(error).__name__}"
+        print(f"blindfold: {cause}", file=sys.stderr)
+        return _fail_closed(raw, cause)
     finally:
         if timed:
             signal.alarm(0)
@@ -82,10 +103,7 @@ def respond_with_deadline(raw: Dict[str, Any], seconds: float = BUDGET_SECONDS +
         return json.loads(b"".join(chunks))
     except Exception:  # noqa: BLE001 - incl. the deadline and a child that died
         print("blindfold: masking ran past its deadline or crashed", file=sys.stderr)
-        try:
-            return withheld_reply(Event(raw))
-        except Exception:  # noqa: BLE001
-            return None
+        return _fail_closed(raw, "it ran past its deadline or crashed")
     finally:
         os.close(reader)
         with contextlib.suppress(ProcessLookupError):

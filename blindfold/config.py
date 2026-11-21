@@ -15,7 +15,9 @@ KEY_PATH = os.path.join(CONFIG_DIR, "fingerprint.key")
 # Real secret files only. Committed templates (.env.sample, .env.example,
 # .env.test) hold fake values that also appear in test code; treating them as
 # known secrets would mask fixtures and make the write guard refuse test edits.
-_ENV_NAMES = [".env", ".env.local", ".env.*.local", ".env.production", ".env.staging", ".env.development"]
+_ENV_NAMES = [
+    ".env", ".env.local", ".env.*.local", ".env.production", ".env.staging", ".env.development", ".envrc", ".envrc.local",
+]
 _ENV_DIRS = ["~", "~/projects/*", "~/projects/*/*", "~/projects/*/worktrees/*/*"]
 DEFAULT_SOURCES = ["~/.config/*/*.env", "~/.config/*/.env"] + [f"{d}/{n}" for d in _ENV_DIRS for n in _ENV_NAMES]
 
@@ -41,6 +43,8 @@ DEFAULT_BLOCKED_COMMANDS = [
     _COMMAND_START + r"op" + _OP_OPTIONS + r"\s+(?:read|inject)\b",
     _COMMAND_START + r"op" + _OP_OPTIONS + r"\s+item\s+get\b[^|;&\n]*(?:--reveal|--fields|--format|--otp)",
     _COMMAND_START + r"op" + _OP_OPTIONS + r"\s+document\s+get\b",
+    # Password helpers (restic-password and the like) print one bare secret.
+    _COMMAND_START + r"[A-Za-z0-9_.]*[-_]password(?=[ \t]|$|[;&|)`])",
 ]
 
 
@@ -72,6 +76,15 @@ class Config:
     # Make Claude Code Bash commands exit 0 (reporting the real code) so their
     # output can be masked; Claude can't replace a failed call's output.
     wrap_claude_bash: bool = True
+    # Refuse commands that print the whole environment or a credential variable.
+    block_env_dumps: bool = True
+    # Refuse commands that switch off the commit hooks' secret scan
+    # (--no-verify, git commit -n, a core.hooksPath override, HUSKY=0).
+    block_secret_scan_bypass: bool = True
+    # Refuse reading or editing secret files outright (see guards.py), plus
+    # extra patterns: a glob with a / is a path (~ allowed), else a file name.
+    protect_secret_files: bool = True
+    extra_protected_files: List[str] = field(default_factory=list)
 
     @property
     def known_secret_files(self) -> List[str]:

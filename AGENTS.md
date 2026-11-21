@@ -10,6 +10,8 @@ blindfold masks secrets in AI agents' tool output. It is security code that must
   - `blindfold/structure.py`: shape-preserving JSON walk.
   - `blindfold/events.py`: one view of Claude and Grok events.
   - `blindfold/handlers.py`: one pure function per hook event.
+  - `blindfold/guards.py`: refuses environment dumps, secret-file reads and secret-scan bypasses.
+  - `blindfold/batch.py`: records handled calls for the PostToolBatch backstop.
   - `blindfold/selfguard.py`: refuses agent changes to blindfold itself (installed copy, config, key, skill, hook settings).
   - `blindfold/shell.py`: just enough shell syntax (quotes, heredocs, separators, words, redirections) for the guards to tell a mention from a use.
   - `blindfold/runtime.py`: config and masker, with the safe fallback.
@@ -30,6 +32,6 @@ blindfold masks secrets in AI agents' tool output. It is security code that must
   - After updating the installed clone, run it with `--installed` (tests what the agents' real config runs).
 - **Calibrate on real code:** `scripts/fp_eval.py <repos>` prints only masked lines.
 - **Never point the installed hook at a working copy:** it runs on every tool call of every session on the machine. Develop here, test, push, then ask the user to run `git -C ~/.local/share/agent-blindfold pull` (blindfold refuses agent changes to the copy it runs from) and run `selftest --installed`.
-- **Fail safe before a call, closed after it:** a PreToolUse/UserPromptSubmit failure lets the call or prompt through with a warning (still refusing commands that name the 1Password or Keychain CLI); a PostToolUse failure withholds the output.
+- **Fail closed everywhere:** a PreToolUse failure refuses the call, a UserPromptSubmit failure blocks the prompt, a PostToolBatch failure stops the turn, a PostToolUse failure withholds the output. Installed hooks set `"onFailure": "block"`, a 60s timeout and an absolute interpreter, so a hook that can't start blocks too. Run `selftest --agent claude --fail-closed` after touching any of it.
 - **Docs:** `README.md` stays short; details go in `docs/design.md`. The guard refuses an agent writing a literal placeholder, so tests assemble them at runtime and doc examples are inserted by a script.
 - **Keep it simple:** Python stdlib only, no dependencies. Prefer data plus one generic path over special cases.

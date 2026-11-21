@@ -127,7 +127,9 @@ class WorktreeGitWrap(unittest.TestCase):
 
         from blindfold.bash import wrap
 
-        for shell in ("zsh", "bash"):
+        import shutil
+
+        for shell in [name for name in ("zsh", "bash") if shutil.which(name)]:
             proc = subprocess.run([shell, "-c", wrap("git --no-such-flag", self.WT)], capture_output=True, text=True, timeout=20)
             self.assertEqual(proc.returncode, 0, shell)
             self.assertIn("[blindfold: exit code nonzero;", proc.stderr, shell)

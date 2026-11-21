@@ -128,17 +128,20 @@ class FailClosed(unittest.TestCase):
         self.assertNotIn(corpus.STRIPE_LIVE, json.dumps(reply))
         self.assertIn("withheld", json.dumps(reply))
 
-    def test_pre_tool_use_crash_allows_the_call_and_says_so(self):
-        # The output is still masked (or withheld) afterwards; refusing every
-        # call over a bug would lock the user and every agent out.
-        reply = withheld_reply(Event({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}}))
-        self.assertNotIn("permissionDecision", reply["hookSpecificOutput"])
-        self.assertIn("doctor", reply["hookSpecificOutput"]["additionalContext"])
+    def test_pre_tool_use_crash_refuses_the_call(self):
+        # Fail closed: a call blindfold couldn't check doesn't run.
+        reply = withheld_reply(Event({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}}), "internal error: KeyError")
+        self.assertEqual(reply["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("doctor", reply["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIn("KeyError", reply["hookSpecificOutput"]["permissionDecisionReason"])
 
-    def test_prompt_check_crash_warns_instead_of_blocking(self):
+    def test_prompt_check_crash_blocks_the_prompt(self):
         reply = withheld_reply(Event({"hook_event_name": "UserPromptSubmit", "prompt": "hi"}))
-        self.assertNotIn("decision", reply)
-        self.assertIn("unchecked", reply["systemMessage"])
+        self.assertEqual(reply["decision"], "block")
+
+    def test_batch_check_crash_stops_the_turn(self):
+        reply = withheld_reply(Event({"hook_event_name": "PostToolBatch", "tool_calls": []}))
+        self.assertEqual(reply["decision"], "block")
 
     def test_unreadable_input_blocks_with_exit_2(self):
         stdin = io.TextIOWrapper(io.BytesIO(b"\xff not json"))

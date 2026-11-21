@@ -5,13 +5,15 @@ import difflib
 import json
 import os
 import re
+import shlex
 import shutil
+import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import __version__
-from .config import CONFIG_PATH, KEY_PATH
+from .config import CONFIG_DIR, CONFIG_PATH, KEY_PATH, load_config
 from .cli_paths import LAUNCHER, SKILL_DIR
 from .hook import main as hook_main
 from .runtime import load_runtime
@@ -22,8 +24,18 @@ EVENTS = {
     "PreToolUse": ".*",
     "PostToolUse": ".*",
     "PostToolUseFailure": ".*",
+    "PostToolBatch": None,
     "Stop": None,
 }
+# Events whose hook failure must block (refuse the call, block the prompt, stop
+# the turn) rather than let the action go ahead. Claude Code honours
+# onFailure on all of them (2.1.295+); Grok only on PreToolUse and
+# UserPromptSubmit, and ignores PostToolBatch.
+FAIL_CLOSED_EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "PostToolBatch")
+# Well over blindfold's own 22s deadline, so the agent's timeout never decides.
+HOOK_TIMEOUT = 60
+MIN_CLAUDE = (2, 1, 295)
+STATE_PATH = os.path.join(CONFIG_DIR, "install-state.json")
 TARGETS = {
     "claude": os.path.expanduser("~/.claude/settings.json"),
     "grok": os.path.expanduser("~/.grok/hooks/blindfold.json"),
@@ -80,17 +92,61 @@ def cmd_doctor(_args) -> int:
     own_grok = os.path.exists(TARGETS["grok"]) and "blindfold" in _read(TARGETS["grok"])
     grok = "installed" if own_grok else "via ~/.claude/settings.json" if installed["grok"] else "not installed"
     print(f"grok   : hooks {grok}")
-    return 0
+    status = 0
+    if installed["claude"]:
+        problems = hook_problems(json.loads(_read(TARGETS["claude"])))
+        version = claude_version()
+        if version is not None and version < MIN_CLAUDE:
+            problems.append(f"Claude Code {'.'.join(map(str, version))} is older than 2.1.295, which ignores onFailure")
+        print(f"fail-closed: {'ok' if not problems else 'NOT fail-closed'}" + (f" (Claude Code {'.'.join(map(str, version))})" if version else ""))
+        for problem in problems:
+            print(f"  ⚠️  {problem}")
+        status = 1 if problems else 0
+        from .guards import claude_deny_rules
+
+        deny = json.loads(_read(TARGETS["claude"])).get("permissions", {}).get("deny", [])
+        missing = [rule for rule in claude_deny_rules(rt.config) if rule not in deny]
+        print(f"deny rules: {'ok' if not missing else f'{len(missing)} missing; run `blindfold install --apply`'}")
+    print("grok   : fails closed before calls and prompts; a failed masking hook after a call fails open in Grok")
+    return status
+
+
+def hook_command() -> str:
+    """The hook command: an absolute interpreter and launcher, so it runs the
+    same whatever PATH the agent was started with."""
+    python = sys.executable if sys.executable and os.path.isabs(sys.executable) else "/usr/bin/python3"
+    return f"{shlex.quote(python)} {shlex.quote(LAUNCHER)} hook"
 
 
 def _hook_entries(command: str) -> Dict[str, List[Dict[str, Any]]]:
     entries = {}
     for event, matcher in EVENTS.items():
-        group: Dict[str, Any] = {"hooks": [{"type": "command", "command": command, "timeout": 30}]}
-        if matcher:
-            group["matcher"] = matcher
+        handler: Dict[str, Any] = {"type": "command", "command": command, "timeout": HOOK_TIMEOUT}
+        if event in FAIL_CLOSED_EVENTS:
+            handler["onFailure"] = "block"
+        group: Dict[str, Any] = {"matcher": matcher} if matcher else {}
+        group["hooks"] = [handler]
         entries[event] = [group]
     return entries
+
+
+def _read_state() -> Dict[str, Any]:
+    try:
+        state = json.loads(_read(STATE_PATH))
+        return state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _with_deny_rules(settings: Dict[str, Any], rules: List[str], owned: List[str]) -> Tuple[Dict[str, Any], List[str]]:
+    """settings with blindfold's deny rules, and the rules blindfold now owns.
+    A rule the user already had is left theirs, so uninstalling never drops it."""
+    permissions = dict(settings.get("permissions") or {})
+    current = [rule for rule in permissions.get("deny", []) if rule not in owned or rule in rules]
+    added = [rule for rule in rules if rule not in current]
+    still_owned = [rule for rule in owned if rule in rules]
+    permissions["deny"] = current + added
+    return {**settings, "permissions": permissions}, still_owned + added
 
 
 def _with_blindfold(settings: Dict[str, Any], command: str) -> Dict[str, Any]:
@@ -101,13 +157,26 @@ def _with_blindfold(settings: Dict[str, Any], command: str) -> Dict[str, Any]:
     return {**settings, "hooks": hooks}
 
 
+def _write_json(path: str, value: Any) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, indent=2)
+        handle.write("\n")
+
+
 def cmd_install(args) -> int:
-    command = f"{LAUNCHER} hook"
+    from .guards import claude_deny_rules
+
+    command = hook_command()
     agents = args.agents or ["claude"]
+    state = _read_state()
     for agent in agents:
         path = TARGETS[agent]
         current = json.loads(_read(path)) if os.path.exists(path) else {}
-        updated = _with_blindfold(current, command) if agent == "claude" else {"hooks": _hook_entries(command)}
+        if agent == "claude":
+            updated, owned = _with_deny_rules(_with_blindfold(current, command), claude_deny_rules(load_config()), state.get("deny", []))
+        else:
+            updated, owned = {"hooks": _hook_entries(command)}, None
         before = json.dumps(current, indent=2).splitlines()
         after = json.dumps(updated, indent=2).splitlines()
         diff = list(difflib.unified_diff(before, after, path, path + " (with blindfold)", lineterm=""))
@@ -117,11 +186,11 @@ def cmd_install(args) -> int:
                 backup = f"{path}.bak-blindfold-{int(time.time())}"
                 shutil.copy2(path, backup)
                 print(f"backup: {backup}")
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as handle:
-                json.dump(updated, handle, indent=2)
-                handle.write("\n")
+            _write_json(path, updated)
             print(f"wrote {path}")
+        if args.apply and owned is not None and owned != state.get("deny"):
+            state["deny"] = owned
+            _write_json(STATE_PATH, state)
         skill = SKILL_TARGETS[agent]
         if args.apply and not os.path.exists(skill):
             os.makedirs(os.path.dirname(skill), exist_ok=True)
@@ -134,10 +203,55 @@ def cmd_install(args) -> int:
     return 0
 
 
+def _version(text: str) -> Optional[Tuple[int, ...]]:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def claude_version() -> Optional[Tuple[int, ...]]:
+    try:
+        out = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return _version(out)
+
+
+def hook_problems(settings: Dict[str, Any]) -> List[str]:
+    """What keeps blindfold's hooks in a Claude settings object from failing closed."""
+    problems = []
+    hooks = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else {}
+    for event in EVENTS:
+        handlers = [
+            h for g in hooks.get(event, []) if isinstance(g, dict) for h in g.get("hooks", [])
+            if isinstance(h, dict) and "blindfold" in str(h.get("command", ""))
+        ]
+        if not handlers:
+            problems.append(f"{event}: no blindfold hook")
+            continue
+        for handler in handlers:
+            if event in FAIL_CLOSED_EVENTS and handler.get("onFailure") != "block":
+                problems.append(f"{event}: hook doesn't set \"onFailure\": \"block\", so a hook failure fails open")
+            words = shlex.split(str(handler.get("command", "")))
+            program = words[0] if words else ""
+            if os.path.basename(program) == "blindfold":
+                problems.append(f"{event}: hook runs the launcher through its `#!/usr/bin/env python3` line, which needs python3 on PATH; reinstall to use an absolute interpreter")
+            elif not os.path.isabs(program):
+                problems.append(f"{event}: hook starts {program!r} from PATH; reinstall to use an absolute interpreter")
+            elif not os.access(program, os.X_OK):
+                problems.append(f"{event}: hook interpreter {program} is missing")
+            launcher = next((w for w in words if w.endswith("blindfold")), None)
+            if launcher and not os.path.exists(launcher):
+                problems.append(f"{event}: hook launcher {launcher} is missing")
+            timeout = handler.get("timeout")
+            if not isinstance(timeout, (int, float)) or timeout < 30:
+                problems.append(f"{event}: hook timeout {timeout!r} leaves no margin over blindfold's 22s deadline")
+    return problems
+
+
 def cmd_selftest(args) -> int:
     from .selftest import run
 
-    return run(agents=args.agents, installed=args.installed)
+    return run(agents=args.agents, installed=args.installed, fail_closed=args.fail_closed)
 
 
 def main(argv=None) -> int:
@@ -155,6 +269,10 @@ def main(argv=None) -> int:
     selftest.add_argument("--agent", dest="agents", action="append", choices=sorted(TARGETS))
     selftest.add_argument(
         "--installed", action="store_true", help="test the hooks the agents' own config runs, not this checkout's"
+    )
+    selftest.add_argument(
+        "--fail-closed", action="store_true",
+        help="with --agent: also run real sessions with a hook that can't start and with PATH emptied",
     )
     args = parser.parse_args(argv)
     commands = {"hook": lambda _a: hook_main(), "scan": cmd_scan, "doctor": cmd_doctor, "install": cmd_install, "selftest": cmd_selftest}

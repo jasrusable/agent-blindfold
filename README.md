@@ -45,16 +45,22 @@ run the pull: agents can't change the installed copy.)
 
 It also:
 
-- refuses commands that print a bare secret (1Password reads, Keychain password reads)
+- refuses commands that print a bare secret (1Password reads, Keychain password reads, `*-password` helpers)
+- refuses commands that dump the environment (`printenv`, `env`, `direnv export`) or echo a credential variable
+- refuses reading secret files outright (`.envrc`, `~/.config/*/*.env`, `*.p8`, `.netrc`), and adds matching deny rules
+- refuses switching off the commit hooks' secret scan (`--no-verify`, `git commit -n`, `HUSKY=0`, a `core.hooksPath` override)
 - blocks prompts where you paste a secret by mistake
 - warns you to rotate anything that got through anyway
 
 ## Safe by default
 
 - **Fails closed.** If masking crashes or runs out of time, the output is
-  withheld, not passed through.
-- **Can't lock you out.** If the pre-call check breaks, calls still go through,
-  with a warning.
+  withheld. If a pre-call check breaks, the call is refused and a prompt is
+  blocked. The installed hooks set `"onFailure": "block"` and start an absolute
+  interpreter, so a hook that can't start or times out blocks too, and in
+  Claude Code a `PostToolBatch` check stops the turn before the model reads
+  output no hook masked. `blindfold doctor` checks all of this. (Grok fails
+  closed before calls and prompts; see [the gaps](docs/design.md#threat-model-and-known-gaps).)
 - **Guards itself.** Agents can't edit the installed copy, its config or key,
   or its hook entries in the agent settings, and can't turn hooks off. They
   hand you the exact command instead, so an accident can't disable masking.
@@ -71,9 +77,9 @@ that, keep secrets off disk (for example `op run` with `op://` references).
 
 | Command | Does |
 |---------|------|
-| `blindfold doctor` | Shows config, the secret files found and install state. Never prints values. |
+| `blindfold doctor` | Shows config, the secret files found and install state, and exits 1 if the hooks don't fail closed. Never prints values. |
 | `blindfold scan [file]` | Masks a file or stdin. |
-| `blindfold selftest` | Canary tests, optionally through a real agent. `--installed` tests the hooks your agents actually run; without it, this checkout's. |
+| `blindfold selftest` | Canary tests, optionally through a real agent. `--installed` tests the hooks your agents actually run; without it, this checkout's. `--fail-closed` adds real sessions with a hook that can't start and with PATH emptied. |
 
 ## Configuration
 

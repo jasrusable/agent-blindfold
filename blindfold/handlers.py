@@ -17,7 +17,7 @@ from .mask import PLACEHOLDER_RE, Finding
 from .rules import PROMPT_BLOCKING_KINDS
 from .runtime import Runtime
 from .structure import mask_value, strings, withhold
-from . import selfguard, shell, transcript
+from . import batch, guards, selfguard, shell, transcript
 
 Reply = Optional[Dict[str, Any]]
 
@@ -41,6 +41,7 @@ Rules:
 2. Never try to recover a masked value: no re-reading another way (cat, head -c, xxd, od, strings, sed, base64, rev, tr, cut, a few characters at a time), no encoding, splitting or hashing to slip past the mask, no subagent or script to repeat it, no guessing from length, id or context.
 3. Never write a placeholder into a file or command (it would replace the real secret; blindfold refuses it). Edit around masked parts.
 4. Never disable, reconfigure or bypass blindfold yourself. blindfold refuses agent changes to its own code, config, key, skill and hook settings; the user makes those.
+5. Some calls are refused outright: environment dumps (printenv, env, direnv export), echoing a credential variable, reading secret files (.envrc, ~/.config/*/*.env, *.p8, .netrc), and switching off the commit hooks' secret scan (--no-verify, git commit -n, HUSKY=0). Don't work around a refusal; check by name, presence or length instead, or ask the user. If blindfold itself fails, it refuses every call: tell the user to run `blindfold doctor`.
 5. If a task needs a value you can't see, stop and ask the user, who can usually run one command.
 6. False positive (something clearly not secret was masked): explain it, then propose the narrowest override, its id in allow_ids or a rule in disabled_rules in ~/.config/blindfold/config.json, and give the user the exact command to make it; you can't edit that file. Never propose allowing env:* kinds.
 7. If a real secret's value is visible to you anywhere (a tool result blindfold missed, a user message, your own output), start your reply with "⚠️ SECRET EXPOSED: <name or kind>, seen in <where>. It reached the model provider and should be rotated." Never repeat the value. Name what to rotate."""
@@ -109,7 +110,11 @@ def post_tool_use(event: Event, rt: Runtime) -> Reply:
         return None
     masked, findings = mask_value(rt.masker, event.result)
     if findings and event.name == "PostToolUseFailure" and not event.is_grok:
+        # Not recorded as handled: PostToolBatch then stops the turn before
+        # the model reads the output this hook couldn't replace.
         return unmaskable_failure(event, findings)
+    if not event.is_grok:
+        batch.mark_handled(event.session_id, event.tool_use_id)
     note = _context(
         failure_note(event),
         summarize(findings) if findings else None,
@@ -163,15 +168,13 @@ def _writes_docs(event: Event) -> bool:
     return "command" not in tool_input and bool(paths) and all(_DOC_FILE.search(p) for p in paths)
 
 
-# When the full check failed (or ran out of time), a linear-time stand-in: any
-# command naming the Keychain or 1Password CLI is refused.
-_MAYBE_BLOCKED = re.compile(r"\b(?:op|security)\b")
-
-
 def pre_tool_use(event: Event, rt: Runtime) -> Reply:
     texts = event.tool_input_texts
     if _is_blocked_command(event, rt.config.blocked_commands):
         return _deny(BLOCKED_COMMAND_REASON)
+    refused = guards.reason(event.tool_input, event.cwd, rt.config)
+    if refused:
+        return _deny(refused)
     changes_blindfold = selfguard.reason(event.tool_input, event.is_read_only_tool, event.cwd)
     if changes_blindfold:
         return _deny(
@@ -253,6 +256,42 @@ def stop(event: Event, rt: Runtime) -> Reply:
     }
 
 
+BATCH_BLOCK_REASON = (
+    "⚠️ blindfold stopped this turn: the output of {calls} may hold secrets that were never masked, because "
+    "blindfold's masking hook failed for {them}. The model hasn't read {it} yet. Don't continue this session as it "
+    "is: rewind to before {it} (Esc Esc) or start a new one, and run `blindfold doctor`."
+)
+
+
+def post_tool_batch(event: Event, rt: Runtime) -> Reply:
+    """Claude only: stop the turn when a call's output holds something maskable
+    that no PostToolUse hook handled (see batch.py)."""
+    calls = event.raw.get("tool_calls")
+    if not isinstance(calls, list):
+        return {"decision": "block", "reason": BATCH_BLOCK_REASON.format(calls="this batch's calls", them="them", it="them")}
+    unmasked = []
+    for call in calls:
+        call = call if isinstance(call, dict) else {}
+        handled = batch.take_handled(event.session_id, call.get("tool_use_id"))
+        if handled:
+            continue
+        _, findings = mask_value(rt.masker, call.get("tool_response", call))
+        if findings:
+            unmasked.append(str(call.get("tool_name") or "a tool"))
+    batch.prune()
+    if not unmasked:
+        return None
+    many = len(unmasked) > 1
+    return {
+        "decision": "block",
+        "reason": BATCH_BLOCK_REASON.format(
+            calls=", ".join(f"`{name}`" for name in unmasked) + (" calls" if many else " call"),
+            them="them" if many else "it",
+            it="them" if many else "it",
+        ),
+    }
+
+
 def session_start(_event: Event, rt: Runtime) -> Reply:
     return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": _context(SESSION_NOTE, rt.warning)}}
 
@@ -261,6 +300,7 @@ HANDLERS: Dict[str, Callable[[Event, Runtime], Reply]] = {
     "PostToolUse": post_tool_use,
     "PostToolUseFailure": post_tool_use,
     "PreToolUse": pre_tool_use,
+    "PostToolBatch": post_tool_batch,
     "UserPromptSubmit": user_prompt_submit,
     "Stop": stop,
     "SessionStart": session_start,
@@ -272,8 +312,19 @@ def handle(event: Event, rt: Runtime) -> Reply:
     return handler(event, rt) if handler else None
 
 
-def withheld_reply(event: Event) -> Reply:
-    """The fail-closed reply when masking itself failed."""
+FAILED_CHECK_REASON = (
+    "blindfold: its check of this call failed ({cause}), so the call was refused: blindfold fails closed. Tell the "
+    "user to run `blindfold doctor` (they can type `! blindfold doctor`) and fix what it reports."
+)
+FAILED_PROMPT_REASON = (
+    "⚠️ blindfold could not check this prompt for secrets ({cause}), so it was blocked: blindfold fails closed. "
+    "Run `blindfold doctor` and fix what it reports, then send it again."
+)
+
+
+def withheld_reply(event: Event, cause: str = "an internal error") -> Reply:
+    """The fail-closed reply when blindfold itself failed: output withheld, the
+    call refused, the prompt blocked, the turn stopped."""
     if event.name in ("PostToolUse", "PostToolUseFailure") and event.result_key is not None:
         return {
             "hookSpecificOutput": {
@@ -282,22 +333,10 @@ def withheld_reply(event: Event) -> Reply:
                 "additionalContext": "blindfold failed while masking this output, so all of its text was withheld.",
             }
         }
-    # Before a call or prompt, a failure lets it through: the security boundary
-    # is masking the output afterwards (which still withholds on failure), and
-    # refusing everything would lock the user and every agent out over a bug.
     if event.name == "PreToolUse":
-        # Except for commands that may print a bare secret, which masking
-        # afterwards can't recognise.
-        if _MAYBE_BLOCKED.search(_command(event) or ""):
-            return _deny(BLOCKED_COMMAND_REASON)
-        note = "blindfold's pre-call check failed, so this call was allowed unchecked. Tell the user to run `blindfold doctor`."
-        reply: Dict[str, Any] = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": note}}
-        # The guards are skipped, but Claude's Bash wrapper is kept: without it a
-        # failing command's output couldn't be masked.
-        command = event.tool_input.get("command") if isinstance(event.tool_input, dict) else None
-        if not event.is_grok and event.tool == "Bash" and isinstance(command, str):
-            reply["hookSpecificOutput"]["updatedInput"] = {**event.tool_input, "command": wrap(command, event.cwd)}
-        return reply
+        return _deny(FAILED_CHECK_REASON.format(cause=cause))
     if event.name == "UserPromptSubmit":
-        return {"systemMessage": "⚠️ blindfold could not check this prompt for secrets (run `blindfold doctor`). It was sent unchecked."}
+        return {"decision": "block", "reason": FAILED_PROMPT_REASON.format(cause=cause)}
+    if event.name == "PostToolBatch":
+        return {"decision": "block", "reason": f"⚠️ blindfold could not check this batch's output ({cause}), so the turn was stopped. Run `blindfold doctor`."}
     return None
