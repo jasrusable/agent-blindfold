@@ -10,15 +10,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # ubuntu-24.04: setup-python has no 3.9 for ubuntu-latest (26.04).
+        os: [ubuntu-24.04, macos-latest]
         python: ["3.9", "3.11", "3.13"]
         zsh: [true]
         include:
           # A Linux box without zsh (like a fresh Debian): its tests must skip, not error.
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             python: "3.13"
             zsh: false
-    name: test (${{ matrix.os }}, ${{ matrix.python }}${{ matrix.zsh && '' || ', no zsh' }})
+    name: test (${{ matrix.os }}, ${{ matrix.python }}${{ !matrix.zsh && ', no zsh' || '' }})
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

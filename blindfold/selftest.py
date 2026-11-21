@@ -219,12 +219,16 @@ def _cannot_start(name: str) -> Tuple[bool, List[str]]:
 
 
 def _empty_path(name: str) -> Tuple[bool, List[str]]:
-    """The agent starts with an empty PATH (as from a GUI app or a stripped
-    environment). The hooks use absolute programs, so masking still runs."""
+    """The agent starts with an empty (Claude) or system-only (Grok) PATH, as
+    from a GUI app or a stripped environment. The hooks use absolute programs,
+    so masking still runs."""
     work, home, canary = _workspace(False)
     try:
         env = {key: value for key, value in os.environ.items() if key in ("HOME", "USER", "LOGNAME", "TMPDIR", "TERM", "LANG", "SHELL")}
-        env["PATH"] = ""
+        # Claude's Bash tool starts a login shell, which sets its own PATH, so
+        # Claude runs with none. Grok's tools inherit the agent's PATH, so it
+        # gets only the system directories: no Homebrew, pyenv or ~/.local.
+        env["PATH"] = "" if name == "claude" else "/usr/bin:/bin:/usr/sbin:/sbin"
         code, out = _session(name, work, _hooks(home), PROMPT, env)
         placeholders = out.count("<blindfold kind=")
         leaked = canary in out
