@@ -20,7 +20,7 @@ from .config import _COMMAND_START, Config
 _END = r"[ \t]*(?:$|[|;&)`>]|\d>|<)"
 _EQUALS = r"[ \t]*(?:=|'='|\"=\")"
 _NAMES_ONLY = (
-    r"[ \t]*\|[ \t]*(?:cut[ \t]+(?:-d" + _EQUALS + r"[ \t]+-f[ \t]*1|-f[ \t]*1[ \t]+-d" + _EQUALS + r")(?![0-9,-])"
+    r"[ \t]*\|[ \t]*(?:cut[ \t]+(?:-d" + _EQUALS + r"[ \t]+-f[ \t]*1|-f[ \t]*1[ \t]+-d" + _EQUALS + r")[ \t]*(?=$|[|;&)])"
     r"|sed[ \t]+(?:-E[ \t]+)?['\"]s/=\.\*//['\"])"
 )
 ENV_DUMP_COMMANDS = [

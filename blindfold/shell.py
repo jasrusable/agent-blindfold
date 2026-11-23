@@ -225,7 +225,8 @@ def strip_data_heredocs(command: str) -> str:
 _CODE_INTERPRETER = re.compile(r"(?:python|pypy|node|nodejs|deno|bun|perl|ruby|php|lua)[\d.]*")
 # Searchers whose quoted arguments are patterns to look for, never commands.
 _SEARCHERS = frozenset(("grep", "egrep", "fgrep", "rg"))
-_QUOTED_ARGUMENT = re.compile(r"'[^']*'|\"(?:[^\"\\\n]|\\.)*\"")
+# Quoted text the shell expands nothing in: single quotes, or double quotes without $, ` or \.
+_LITERAL_QUOTED = re.compile(r"'[^']*'|\"[^\"$`\\]*\"")
 
 
 def strip_non_commands(command: str) -> str:
@@ -243,12 +244,20 @@ def strip_non_commands(command: str) -> str:
         saved = writes_heredoc_to_file(part) and separator != "|"
         if saved:
             saved = not any(runs_file(pairs[index + 1 :], target) for target in write_targets(part))
-        coded = _CODE_INTERPRETER.fullmatch(name) and _HEREDOC.search(line) and not runs_substitution(part)
+        # Only when the body is the script (`python3 - <<EOF`, `node <<EOF`), not data for -c/-e code.
+        words_ = line.split()
+        coded = (
+            _CODE_INTERPRETER.fullmatch(name) and _HEREDOC.search(line) and not runs_substitution(part)
+            and not any(w in ("-c", "-e", "-p", "--eval", "--print", "-r") for w in words_)
+        )
         if saved or coded:
             part = line
         if name in _SEARCHERS:
             # Not a double-quoted "$(…)" or `…`: the shell runs that before grep sees it.
-            part = _QUOTED_ARGUMENT.sub(lambda m: m.group(0) if m.group(0)[0] == '"' and ("$(" in m.group(0) or "`" in m.group(0)) else "''", part)
+            # Literal quoted text only (the shell expands nothing in it), and only when
+            # the part runs no substitution at all.
+            if not runs_substitution(part):
+                part = _LITERAL_QUOTED.sub("''", part)
         # Separators kept, so a pipe still reads as one (`env | cut -d= -f1`).
         kept.append(part + (f" {separator} " if separator.strip() else "\n"))
     return "".join(kept)

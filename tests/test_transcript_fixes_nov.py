@@ -87,7 +87,8 @@ class CommandText(unittest.TestCase):
             self.assertFalse(denied(pre(command)), command)
 
     def test_value_listings_are_still_refused(self):
-        for command in ("env", "env | cut -d= -f2", "env | cut -d= -f1-2", "env | sort", "env | cut -d= -f1,2"):
+        for command in ("env", "env | cut -d= -f2", "env | cut -d= -f1-2", "env | sort", "env | cut -d= -f1,2",
+                        "env | cut -d= -f1 --complement", "env | cut -f1 -d= --complement", "env | cut -d= -f1 -s --complement"):
             self.assertTrue(denied(pre(command)), command)
 
     def test_searching_for_command_text_is_not_running_it(self):
@@ -103,7 +104,9 @@ class CommandText(unittest.TestCase):
     def test_real_uses_are_still_refused(self):
         for command in (f"{OP} read {OP}://v/i/f", f"bash <<'EOF'\n{OP} read {OP}://v/i/f\nEOF", "bash <<'EOF'\nenv\nEOF",
                         f"python3 - <<EOF\n$({OP} read {OP}://v/i/f)\nEOF", f"grep x $({OP} read {OP}://v/i/f)",
-                        f'grep x "$({OP} read {OP}://v/i/f)"', f'grep x "`{OP} read {OP}://v/i/f`"'):
+                        f'grep x "$({OP} read {OP}://v/i/f)"', f'grep x "`{OP} read {OP}://v/i/f`"',
+                        f"grep 'x' $({OP} read {OP}://v/i/f)", f"grep \"x'\" '$({OP} read {OP}://v/i/f)'",
+                        f"python3 -c 'import sys' <<'EOF'\n{OP} read {OP}://v/i/f\nEOF"):
             self.assertTrue(denied(pre(command)), command)
 
 
@@ -131,7 +134,11 @@ class SshReads(unittest.TestCase):
     def test_writing_over_ssh_or_feeding_it_a_script_is_refused(self):
         for command in (f"ssh host 'sed -i s/a/b/ {self.settings}'", f"ssh host 'echo x > {self.install}/x'",
                         f"ssh host bash -s <<'EOF'\nrm {self.settings}\nEOF", f"echo rm {self.settings} | ssh host sh",
-                        f"ssh host python3 -c 'open(\"{self.settings}\", \"w\")'", f"ssh host rm {self.settings}"):
+                        f"ssh host python3 -c 'open(\"{self.settings}\", \"w\")'", f"ssh host rm {self.settings}",
+                        # Options that write or run here: a log file, a proxy or local command, a config, a socket.
+                        f"ssh -E {self.settings} host true", f"ssh -E{self.settings} host cat x",
+                        f"ssh -o ProxyCommand='rm {self.settings}' host true", f"ssh -oLocalCommand='rm {self.settings}' -o PermitLocalCommand=yes host ls",
+                        f"ssh -F {self.install}/cfg host ls", f"ssh -S {self.install}/sock host ls", f"ssh -L {self.install}/s:h:2 host ls"):
             self.assertTrue(self.reason(command), command)
 
 

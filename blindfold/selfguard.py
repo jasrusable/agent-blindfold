@@ -287,8 +287,17 @@ def _sed_kind(texts: List[str]) -> str:
     return "other" if any(re.search(r"[wWe]", script) for script in scripts) else "reader"
 
 
-# ssh options that take a value (OpenSSH).
+# ssh options that take a value (OpenSSH), and those that neither run nor
+# write anything here (-E writes a log, -F reads a config that may run
+# commands, -S and -O drive a control socket, -L/-R/-D/-W forward ports).
 _SSH_VALUE_OPTIONS = frozenset("bcDEeFIiJLlmOopQRSWw")
+_SSH_SAFE_FLAGS = frozenset("46AaCgKkMNnqTtVvXxYy")
+_SSH_SAFE_VALUES = frozenset("ilpJ")
+# -o settings that only tune the connection (ProxyCommand, LocalCommand and the like run code).
+_SSH_SAFE_SETTINGS = frozenset(
+    "connecttimeout batchmode stricthostkeychecking serveraliveinterval serveralivecountmax loglevel "
+    "connectionattempts identitiesonly requesttty".split()
+)
 
 
 def _ssh_remote(texts: List[str]) -> Optional[str]:
@@ -303,8 +312,14 @@ def _ssh_remote(texts: List[str]) -> Optional[str]:
         letters = option[1:]
         for position, letter in enumerate(letters):
             if letter in _SSH_VALUE_OPTIONS:
+                value = letters[position + 1 :] or (texts[at] if at < len(texts) else "")
                 at += 0 if letters[position + 1 :] else 1
+                setting = value.split("=", 1)[0].split()[0].lower() if value.strip() else ""
+                if not (letter in _SSH_SAFE_VALUES or (letter == "o" and setting in _SSH_SAFE_SETTINGS)):
+                    return None
                 break
+            if letter not in _SSH_SAFE_FLAGS:
+                return None
     rest = texts[at + 1 :]
     return " ".join(rest) if at < len(texts) and rest else None
 
