@@ -287,6 +287,28 @@ def _sed_kind(texts: List[str]) -> str:
     return "other" if any(re.search(r"[wWe]", script) for script in scripts) else "reader"
 
 
+# ssh options that take a value (OpenSSH).
+_SSH_VALUE_OPTIONS = frozenset("bcDEeFIiJLlmOopQRSWw")
+
+
+def _ssh_remote(texts: List[str]) -> Optional[str]:
+    """The command ssh runs on the host, or None (an interactive login, or
+    options it can't follow)."""
+    at = 0
+    while at < len(texts) and texts[at].startswith("-"):
+        option = texts[at]
+        at += 1
+        if option == "--":
+            break
+        letters = option[1:]
+        for position, letter in enumerate(letters):
+            if letter in _SSH_VALUE_OPTIONS:
+                at += 0 if letters[position + 1 :] else 1
+                break
+    rest = texts[at + 1 :]
+    return " ".join(rest) if at < len(texts) and rest else None
+
+
 def _kind(words: List[Word]) -> str:
     """How the command treats its arguments (see _READERS)."""
     if not words:
@@ -306,6 +328,8 @@ def _kind(words: List[Word]) -> str:
         return "runner"
     if name == "file" and any(text in ("-C", "--compile") for text in texts):
         return "other"
+    if name == "ssh":
+        return "ssh"
     if name in ("cd", "pushd", "popd", "git", "dd"):
         return "cd" if name == "pushd" else name
     if name in _READERS or name in _ASSIGNERS:
@@ -473,6 +497,14 @@ def _command_reason(command: str, cwd: Optional[str], protected: List[str], sett
         words = found.words
         scopes += [here] * found.opened
         kind = "runner" if found.runs else _kind(words)
+        if kind == "ssh":
+            # The remote command, judged as if run here (its ~ taken as this
+            # machine's, the cautious reading): a read there is a read.
+            # What it feeds the remote command (a heredoc, a pipe) stays checked.
+            remote = _ssh_remote([word.text for word in words[1:]])
+            fed = body + (pipelines[index] if index > 0 and segments[index - 1][2] == "|" else "")
+            clean = remote and _command_reason(remote, None, protected, settings) is None and not _named(fed, guarded)
+            kind = "reader" if clean else "other"
         assignments = found.assignments + ([word for word in words[1:] if _ASSIGNMENT.match(word.text)] if kind == "assign" else [])
         risky_env = risky_env or any(_RISKY_ENV.match(word.text) for word in assignments)
         if kind in ("cd", "popd"):

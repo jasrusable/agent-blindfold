@@ -221,6 +221,39 @@ def strip_data_heredocs(command: str) -> str:
     return "\n".join(kept)
 
 
+# Interpreters whose here-document body is code in their own language, not shell commands.
+_CODE_INTERPRETER = re.compile(r"(?:python|pypy|node|nodejs|deno|bun|perl|ruby|php|lua)[\d.]*")
+# Searchers whose quoted arguments are patterns to look for, never commands.
+_SEARCHERS = frozenset(("grep", "egrep", "fgrep", "rg"))
+_QUOTED_ARGUMENT = re.compile(r"'[^']*'|\"(?:[^\"\\\n]|\\.)*\"")
+
+
+def strip_non_commands(command: str) -> str:
+    """The command as the shell would run it, for the checks that match command
+    text (blocked commands, environment dumps): strip_data_heredocs, and also the
+    body of a here-document fed to a code interpreter (`python3 - <<'EOF'` runs
+    Python, so `env` or `op read` in it is a string, not a command) and the quoted
+    patterns of grep and rg (`grep 'op read|vault'` searches for that text). Not
+    for the file guards: an interpreter may still open a path its body names."""
+    pairs = split(command)
+    kept = []
+    for index, (part, separator) in enumerate(pairs):
+        line = first_line(part)
+        name = head(line)
+        saved = writes_heredoc_to_file(part) and separator != "|"
+        if saved:
+            saved = not any(runs_file(pairs[index + 1 :], target) for target in write_targets(part))
+        coded = _CODE_INTERPRETER.fullmatch(name) and _HEREDOC.search(line) and not runs_substitution(part)
+        if saved or coded:
+            part = line
+        if name in _SEARCHERS:
+            # Not a double-quoted "$(…)" or `…`: the shell runs that before grep sees it.
+            part = _QUOTED_ARGUMENT.sub(lambda m: m.group(0) if m.group(0)[0] == '"' and ("$(" in m.group(0) or "`" in m.group(0)) else "''", part)
+        # Separators kept, so a pipe still reads as one (`env | cut -d= -f1`).
+        kept.append(part + (f" {separator} " if separator.strip() else "\n"))
+    return "".join(kept)
+
+
 def write_targets(part: str) -> List[str]:
     """Files a data command writes: redirect targets and tee's arguments."""
     line = first_line(part)

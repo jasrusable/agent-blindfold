@@ -154,7 +154,7 @@ def _is_blocked_command(event: Event, patterns: List[str]) -> bool:
     command = _command(event)
     if command is None:
         return False
-    judged = shell.strip_data_heredocs(command)
+    judged = shell.strip_non_commands(command)
     return any(re.search(pattern, judged, re.MULTILINE) for pattern in patterns)
 
 

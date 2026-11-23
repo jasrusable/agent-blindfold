@@ -76,6 +76,9 @@ _NOT_A_VALUE_HEAD = {
     "text", "description", "completed", "reset", "changed", "updated", "at", "set", "visible",
     "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rb", "go", "rs", "sh", "json", "yaml", "yml", "md", "toml",
 }
+# A Sentry DSN only lets a client send events, so Sentry ships it in client
+# code by design: the value is public whatever its name (SENTRY_DSN).
+PUBLIC_VALUE = re.compile(r"https://[0-9a-f]{32}@[a-z0-9.-]*\bsentry\.io/[0-9]+/?")
 # Anywhere in the name, these mean the value is meant to be seen.
 _PUBLIC = {"public", "publishable", "example", "sample"}
 
@@ -103,6 +106,9 @@ def is_public_name(name: str) -> bool:
     segments = name_segments(name)
     if _STILL_SECRET.intersection(segments) or any(part in s for s in segments for part in _STRONG_PARTS):
         return False
+    # Vite bundles every VITE_ variable into the page, so one is public unless its name says secret.
+    if segments[:1] == ["vite"]:
+        return not is_secret_name(name)
     return bool({"public", "publishable"}.intersection(segments))
 
 
@@ -123,7 +129,7 @@ PLACEHOLDER_VALUE = re.compile(
     r"""^(?:
         |true|false|null|none|nil|undefined|yes|no|on|off|empty|unset|required|optional
         |x+|\*+|\.+|-+|\#+|changeme|change[_-]?me|example|sample|dummy|test|testing|redacted|secret|password
-        |values?|val|placeholder|foo|bar|baz|foobar
+        |values?|val|placeholder|foo|bar|baz|foobar|pass|passwd|pwd
         |your[_-].*|<.*>|\[.*\]|\$\{.*\}|\$\(.*\)|\$[A-Za-z_][A-Za-z0-9_]*|%\(.*\)s|%s|\{\{.*\}\}|\{.*\}
         |process\.env\..*|import\.meta\.env\..*|os\.environ.*|env\(.*\)|getenv\(.*\)|config\..*
         |string|str|number|int|integer|boolean|bool|any|object|bytes|buffer|secretstr
@@ -164,7 +170,7 @@ def is_placeholder(value: str) -> bool:
     """Whether a value found next to a secret-looking name is clearly not a secret."""
     stripped = value.strip()
     # Prose punctuation after a stand-in word ("--password value, …", "(--token <value>)") isn't part of it.
-    candidates = (stripped, stripped.rstrip(".,;:"), stripped.rstrip(".,;:)"))
+    candidates = (stripped, stripped.rstrip(".,;:"), stripped.rstrip(".,;:)"), stripped.rstrip(".,;:)`"))
     return len(stripped) < 4 or any(PLACEHOLDER_VALUE.match(c) for c in candidates)
 
 
@@ -217,7 +223,7 @@ def is_secretish(value: str, context: str) -> bool:
       credential, since in code a bare value is an identifier or expression.
     """
     stripped = value.strip()
-    if is_placeholder(stripped):
+    if is_placeholder(stripped) or PUBLIC_VALUE.fullmatch(stripped):
         return False
     if context == "strong":
         # A call or an attribute reference (settings.DB_PASSWORD) is code. A
@@ -318,7 +324,6 @@ RULES = [
     _rule("docker-auth", r"\"auth\"\s*:\s*\"([A-Za-z0-9+/=]{12,})\"", 1),
     # scheme://user:password@host (user may be empty: redis://:pw@host).
     _rule("url-password", r"\b[a-z][a-z0-9+.-]{1,20}://[^\s:/@'\"<>]{0,128}:([^\s@/'\"<>]{3,256})@", 1, re.IGNORECASE),
-    _rule("sentry-dsn-key", r"https://([0-9a-f]{32})(?::[0-9a-f]{32})?@[a-z0-9.-]*\bsentry\.io\b", 1),
     _rule(
         "auth-header",
         r"\b(?:proxy-)?authorization\s*[:=]\s*[\"']?(?:bearer|basic|token|bot|digest)\s+([A-Za-z0-9._~+/=:-]{8,})",

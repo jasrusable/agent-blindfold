@@ -37,6 +37,12 @@ class Finding:
     weak: bool = False
 
 _KEY_BEFORE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]{0,63})[\"']?[ \t]*[:=][ \t]*[\"']?$")
+# A token followed by a source, doc or media file extension is a file name or
+# path (src/institutionUsers/hooks/prefetchInstitutionUsers.ts), not a key.
+_FILE_EXTENSION_AFTER = re.compile(
+    r"\.(?:test\.|spec\.|stories\.|d\.|module\.)?(?:tsx?|jsx?|mjs|cjs|mts|cts|py|rb|go|rs|sh|zsh|swift|kt|java|c|h|cpp"
+    r"|json|jsonl|ya?ml|toml|md|mdx|txt|csv|sql|html|css|scss|svg|png|jpe?g|gif|webp|ico|pdf|lock|log)(?![A-Za-z0-9])"
+)
 _FINGERPRINT_BEFORE = re.compile(r"(?:SHA(?:1|256|384|512)|MD5):$", re.IGNORECASE)
 # Public by design: a Google OAuth client id (<digits>-<32 alnum>.apps.googleusercontent.com).
 _GOOGLE_CLIENT_ID = re.compile(r"[0-9]{6,20}-[a-z0-9]{32}")
@@ -182,6 +188,8 @@ class Masker:
             # (owasp.org/Top10/A03_2021-Injection); one after `#` is an anchor.
             before = match.string[match.start() - 1 : match.start()]
             if ("/" in value and before in (".", "/", ":")) or before == "#":
+                return None
+            if _FILE_EXTENSION_AFTER.match(match.string, match.end()):
                 return None
             # The value of an id field ("fileId": "1AbC…"): an identifier, like a Drive file id.
             key = _KEY_BEFORE.search(match.string, max(0, match.start() - 80), match.start())
