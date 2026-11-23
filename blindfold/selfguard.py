@@ -287,6 +287,43 @@ def _sed_kind(texts: List[str]) -> str:
     return "other" if any(re.search(r"[wWe]", script) for script in scripts) else "reader"
 
 
+# ssh options that take a value (OpenSSH), and those that neither run nor
+# write anything here (-E writes a log, -F reads a config that may run
+# commands, -S and -O drive a control socket, -L/-R/-D/-W forward ports).
+_SSH_VALUE_OPTIONS = frozenset("bcDEeFIiJLlmOopQRSWw")
+_SSH_SAFE_FLAGS = frozenset("46AaCgKkMNnqTtVvXxYy")
+_SSH_SAFE_VALUES = frozenset("ilpJ")
+# -o settings that only tune the connection (ProxyCommand, LocalCommand and the like run code).
+_SSH_SAFE_SETTINGS = frozenset(
+    "connecttimeout batchmode stricthostkeychecking serveraliveinterval serveralivecountmax loglevel "
+    "connectionattempts identitiesonly requesttty".split()
+)
+
+
+def _ssh_remote(texts: List[str]) -> Optional[str]:
+    """The command ssh runs on the host, or None (an interactive login, or
+    options it can't follow)."""
+    at = 0
+    while at < len(texts) and texts[at].startswith("-"):
+        option = texts[at]
+        at += 1
+        if option == "--":
+            break
+        letters = option[1:]
+        for position, letter in enumerate(letters):
+            if letter in _SSH_VALUE_OPTIONS:
+                value = letters[position + 1 :] or (texts[at] if at < len(texts) else "")
+                at += 0 if letters[position + 1 :] else 1
+                setting = value.split("=", 1)[0].split()[0].lower() if value.strip() else ""
+                if not (letter in _SSH_SAFE_VALUES or (letter == "o" and setting in _SSH_SAFE_SETTINGS)):
+                    return None
+                break
+            if letter not in _SSH_SAFE_FLAGS:
+                return None
+    rest = texts[at + 1 :]
+    return " ".join(rest) if at < len(texts) and rest else None
+
+
 def _kind(words: List[Word]) -> str:
     """How the command treats its arguments (see _READERS)."""
     if not words:
@@ -306,6 +343,8 @@ def _kind(words: List[Word]) -> str:
         return "runner"
     if name == "file" and any(text in ("-C", "--compile") for text in texts):
         return "other"
+    if name == "ssh":
+        return "ssh"
     if name in ("cd", "pushd", "popd", "git", "dd"):
         return "cd" if name == "pushd" else name
     if name in _READERS or name in _ASSIGNERS:
@@ -441,7 +480,7 @@ def _pipelines(segments: List[Tuple[str, str, str]]) -> List[str]:
     return [text[index] for index in range(len(segments))]
 
 
-def _command_reason(command: str, cwd: Optional[str], protected: List[str], settings: List[str]) -> Optional[str]:
+def _command_reason(command: str, cwd: Optional[str], protected: List[str], settings: List[str], depth: int = 0) -> Optional[str]:
     """Refuse a command that may write to a protected path or the agent
     settings. Readers (ls, cat, grep, git log, …) may name one; a redirection,
     a copier's destination or a variable may not point at one; any other
@@ -473,6 +512,18 @@ def _command_reason(command: str, cwd: Optional[str], protected: List[str], sett
         words = found.words
         scopes += [here] * found.opened
         kind = "runner" if found.runs else _kind(words)
+        if kind == "ssh":
+            # The remote command, judged as if run here (its ~ taken as this
+            # machine's, the cautious reading): a read there is a read.
+            # What it feeds the remote command (a heredoc, a pipe) stays checked.
+            remote = _ssh_remote([word.text for word in words[1:]])
+            fed = body + (pipelines[index] if index > 0 and segments[index - 1][2] == "|" else "")
+            # Three hops deep is plenty; deeper is judged as code it can't follow (and stays fast).
+            clean = (
+                remote and depth < 3 and not _named(fed, guarded)
+                and _command_reason(remote, None, protected, settings, depth + 1) is None
+            )
+            kind = "reader" if clean else "other"
         assignments = found.assignments + ([word for word in words[1:] if _ASSIGNMENT.match(word.text)] if kind == "assign" else [])
         risky_env = risky_env or any(_RISKY_ENV.match(word.text) for word in assignments)
         if kind in ("cd", "popd"):

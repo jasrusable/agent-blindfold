@@ -18,7 +18,8 @@ _BLOB = re.compile(r"^(?:data:[^,\s]{0,100},)?([A-Za-z0-9+/=_\s-]{64,})$")
 
 
 # MCP media blocks carry their payload under `data`.
-_MEDIA_TYPES = frozenset({"image", "audio", "document"})
+# The Messages API nests it one level down: {"type": "image", "source": {"type": "base64", "data": …}}.
+_MEDIA_TYPES = frozenset({"image", "audio", "document", "base64"})
 # Schema keys look like identifiers; anything else may itself be a value.
 _SCHEMA_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,40}$")
 # PNG, JPEG, GIF, WebP (RIFF), PDF.
@@ -90,6 +91,23 @@ def decoded_text(value: str) -> str:
     return "\n".join(run.decode("ascii") for run in runs)
 
 
+def readable_text(value: str) -> str:
+    """The part of an image or PDF that is text by design: a PDF's streams (raw
+    and inflated) and a PNG's text chunks. Unlike the raw bytes around them,
+    a random-looking run here is a real finding."""
+    match = _BLOB.match(value)
+    encoded = re.sub(r"\s", "", match.group(1)) if match else ""
+    try:
+        decoded = base64.b64decode(encoded.replace("-", "+").replace("_", "/") + "=" * (-len(encoded) % 4))
+    except (binascii.Error, ValueError):
+        return ""
+    if decoded.startswith(b"%PDF-"):
+        return decoded_text(value)
+    parts = (_png_text_chunks(decoded) if decoded.startswith(b"\x89PNG") else []) + _inflated(decoded)
+    runs = [run for data in parts for run in re.findall(rb"[\x20-\x7e]{8,}", data)]
+    return "\n".join(run.decode("ascii") for run in runs)
+
+
 def deep_map(value: Any, fn: Callable[[str], str], map_keys: bool = True, blob_fn: Optional[Callable[[str], str]] = None) -> Any:
     """Apply fn to every string leaf, keeping the structure and every non-string value.
 
@@ -142,7 +160,12 @@ def mask_value(masker: Masker, value: Any) -> Tuple[Any, List[Finding]]:
     def check_blob(blob: str) -> str:
         """An image or PDF is left intact unless its readable text hides a secret;
         then the whole blob is masked (it can't be edited in place)."""
-        _, found = masker.mask(decoded_text(blob))
+        # Compressed pixel bytes are random by nature, so in the raw bytes a run
+        # looking random says nothing: only a rule or a known value counts there.
+        # Text by design (PNG text chunks, PDF streams) keeps every check.
+        _, raw = masker.mask(decoded_text(blob))
+        _, readable = masker.mask(readable_text(blob))
+        found = [finding for finding in raw if finding.kind != "high-entropy"] + readable
         if not found:
             return blob
         findings.extend(found)

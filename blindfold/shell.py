@@ -221,6 +221,49 @@ def strip_data_heredocs(command: str) -> str:
     return "\n".join(kept)
 
 
+# Interpreters whose here-document body is code in their own language, not shell commands.
+_CODE_INTERPRETER = re.compile(r"(?:python|pypy|node|nodejs|deno|bun|perl|ruby|php|lua)[\d.]*")
+# Searchers whose quoted arguments are patterns to look for, never commands.
+_SEARCHERS = frozenset(("grep", "egrep", "fgrep", "rg"))
+# Quoted text the shell expands nothing in: single quotes, or double quotes without $, ` or \.
+_LITERAL_QUOTED = re.compile(r"'[^']*'|\"[^\"$`\\]*\"")
+
+
+def strip_non_commands(command: str) -> str:
+    """The command as the shell would run it, for the checks that match command
+    text (blocked commands, environment dumps): strip_data_heredocs, and also the
+    body of a here-document fed to a code interpreter (`python3 - <<'EOF'` runs
+    Python, so `env` or `op read` in it is a string, not a command) and the quoted
+    patterns of grep and rg (`grep 'op read|vault'` searches for that text). Not
+    for the file guards: an interpreter may still open a path its body names."""
+    pairs = split(command)
+    kept = []
+    for index, (part, separator) in enumerate(pairs):
+        line = first_line(part)
+        name = head(line)
+        saved = writes_heredoc_to_file(part) and separator != "|"
+        if saved:
+            saved = not any(runs_file(pairs[index + 1 :], target) for target in write_targets(part))
+        # Only when the body is the script (`python3 - <<EOF`, `node <<EOF`), not data for -c/-e code.
+        # Only `<interpreter> [-]` (plus python's -u/-I/-B): any other option may pass code itself.
+        options = [w for w in line.split()[1:] if not w.startswith("<") and not w.startswith(">")]
+        coded = (
+            _CODE_INTERPRETER.fullmatch(name) and _HEREDOC.search(line) and not runs_substitution(part)
+            and all(w in ("-", "-u", "-I", "-B") for w in options)
+        )
+        if saved or coded:
+            part = line
+        if name in _SEARCHERS:
+            # Not a double-quoted "$(…)" or `…`: the shell runs that before grep sees it.
+            # Literal quoted text only (the shell expands nothing in it), and only when
+            # the part runs no substitution at all.
+            if not runs_substitution(part) and "--pre" not in part:
+                part = _LITERAL_QUOTED.sub("''", part)
+        # Separators kept, so a pipe still reads as one (`env | cut -d= -f1`).
+        kept.append(part + (f" {separator} " if separator.strip() else "\n"))
+    return "".join(kept)
+
+
 def write_targets(part: str) -> List[str]:
     """Files a data command writes: redirect targets and tee's arguments."""
     line = first_line(part)

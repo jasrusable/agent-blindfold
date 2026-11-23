@@ -18,9 +18,15 @@ from .config import _COMMAND_START, Config
 
 # Prints every variable, or the values a tool loads from a secret file.
 _END = r"[ \t]*(?:$|[|;&)`>]|\d>|<)"
+_EQUALS = r"[ \t]*(?:=|'='|\"=\")"
+_NAMES_ONLY = (
+    r"[ \t]*\|[ \t]*(?:cut[ \t]+(?:-d" + _EQUALS + r"[ \t]+-f[ \t]*1|-f[ \t]*1[ \t]+-d" + _EQUALS + r")[ \t]*(?=$|[|;&)])"
+    r"|sed[ \t]+(?:-E[ \t]+)?['\"]s/=\.\*//['\"])"
+)
 ENV_DUMP_COMMANDS = [
     _COMMAND_START + r"printenv\b",
-    _COMMAND_START + r"env" + _END,
+    # Not `env | cut -d= -f1` or `env | sed 's/=.*//'`: names only.
+    _COMMAND_START + r"env(?!" + _NAMES_ONLY + r")" + _END,
     _COMMAND_START + r"(?:set|export|declare|typeset)(?:[ \t]+-[a-zA-Z]*[px][a-zA-Z]*)?" + _END,
     _COMMAND_START + r"(?:declare|typeset)[ \t]+-[a-zA-Z]*p",
     _COMMAND_START + r"direnv\s+(?:export|dump|show|exec)\b",
@@ -166,9 +172,10 @@ def _word_reason(text: str, cwd: Optional[str], patterns: List[str], config: Con
 
 def command_reason(command: str, cwd: Optional[str], config: Config) -> Optional[str]:
     judged = shell.strip_data_heredocs(command)
-    if config.block_env_dumps and any(re.search(p, judged, re.MULTILINE) for p in ENV_DUMP_COMMANDS):
+    run = shell.strip_non_commands(command)
+    if config.block_env_dumps and any(re.search(p, run, re.MULTILINE) for p in ENV_DUMP_COMMANDS):
         return ENV_DUMP_REASON
-    if config.block_env_dumps and re.search(CREDENTIAL_ECHO, judged, re.MULTILINE):
+    if config.block_env_dumps and re.search(CREDENTIAL_ECHO, run, re.MULTILINE):
         return CREDENTIAL_ECHO_REASON
     return _word_reason(judged, cwd, _protected_patterns(config), config, 0)
 

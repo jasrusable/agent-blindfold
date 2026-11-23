@@ -98,7 +98,6 @@ MUST_MASK = [
     (f'{{"private_key": "{PEM}"}}'.replace("\n", "\\n"), PEM.replace("\n", "\\n")),
     (f"DATABASE_URL={DB_URL}", DB_PASSWORD),
     (f"connecting to {DB_URL} ...", DB_PASSWORD),
-    (f"SENTRY_DSN={SENTRY_DSN}", SENTRY_DSN_KEY),
     (f"psql --password {DB_PASSWORD} -h x", DB_PASSWORD),
     (f"mysql --password='{DB_PASSWORD}'", DB_PASSWORD),
     (f'password: "{DB_PASSWORD}"', DB_PASSWORD),
@@ -177,6 +176,9 @@ MUST_MASK = [
 
 # Ordinary output that must come back unchanged.
 MUST_NOT_MASK = [
+    # A Sentry DSN is public by design (Sentry ships it in client code).
+    f"SENTRY_DSN={SENTRY_DSN}",
+    f"dsn: '{SENTRY_DSN}',",
     # Letters-only values that are words, not keys: few capitals, or one case.
     "token_class: ReadOnlyAccessTokenProviderFactory",
     'secret_name: "stripe_webhook_signing_secret_staging"',

@@ -25,7 +25,12 @@ Detection has three layers:
    forms, its Unicode NFC/NFD forms, and either case of a hex value. Values
    under a `PUBLIC`/`PUBLISHABLE` name (`EXPO_PUBLIC_*`) ship to clients, so
    they don't count, unless the name also says secret, password, service,
-   private, role or admin. The regex is built per call from only the values that
+   private, role or admin. Vite bundles every `VITE_*` variable into the page,
+   so those count only when the name says secret (`VITE_API_PROXY_TOKEN`). A
+   Sentry DSN only lets a client send events and ships in client code, so it is
+   public under any name. Word-like values and short lowercase labels under 12
+   characters are left to the rules: an exact match would hide that word in
+   every folder name and fixture. The regex is built per call from only the values that
    occur in the text, usually none, which keeps a hook call around 50ms.
 2. **Rules.** Vendor formats (Stripe, GitHub, AWS, Slack, Anthropic, OpenAI,
    Google, Sentry, PEM private keys, JWTs, and more) plus context: `NAME=value`
@@ -34,8 +39,11 @@ Detection has three layers:
    `max_tokens` and `TOKEN_URL` don't.
 3. **Entropy.** Long random-looking tokens no rule named, except alphabets (no
    repeated character and an `ABCDEF`-style run), Google OAuth client ids and
-   `SHA256:` key fingerprints. Bare hex is never judged by entropy (it can't be
-   told from a hash).
+   `SHA256:` key fingerprints, and a token followed by a source, doc or media
+   file extension (`src/hooks/prefetchInstitutionUsers.ts`), which is a file
+   name. Bare hex is never judged by entropy (it can't be told from a hash). In
+   an image or PDF, only rules and known values count: compressed pixel bytes
+   look random by nature.
 
 It **fails closed**, at every layer:
 
@@ -70,7 +78,8 @@ Masking runs on everything, but some calls are refused outright:
 
 - **Bare secrets:** commands whose whole output is a secret (Keychain password
   reads, `op read`, `*-password` helpers). Configurable as `blocked_commands`.
-- **Environment dumps:** `printenv`, bare `env`/`set`/`export`, `declare -p`,
+- **Environment dumps:** `printenv`, bare `env`/`set`/`export` (not `env | cut -d= -f1`
+  or `env | sed 's/=.*//'`, which list names only), `declare -p`,
   `direnv export|show|dump|exec`, `/proc/*/environ`, and `echo`/`printf` of a
   credential variable (`$DATABASE_URL`, `$PGPASSWORD`, anything named
   `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*API_KEY*`). `${#NAME}` and
@@ -160,7 +169,14 @@ comments, here-documents and here-strings, `;`, `&`, `&&`, `||`, `|`), so a `|`
 inside a grep pattern or a path inside a heredoc of notes isn't mistaken for
 use, and anything the split can't settle is judged as code. The same applies
 to the blocked commands: a heredoc saved to a file is data, while one piped
-into a shell is judged.
+into a shell is judged. For the blocked commands and environment dumps, which
+match command text, a heredoc fed to Python, Node, Ruby or Perl is code in that
+language and a grep or rg pattern is text searched for, so neither is judged
+(unless it runs a `$(…)`).
+
+`ssh host <command>` is judged by its remote command, as if it ran here: a
+read there (`ssh host 'grep -n env ~/.claude/settings.json'`) is a read; a write,
+or a script fed on stdin that names a protected path, is not.
 
 Changes to blindfold go through the user, who can type `! <command>`. Your
 development checkout is not protected; only the copy the hook runs from is.
