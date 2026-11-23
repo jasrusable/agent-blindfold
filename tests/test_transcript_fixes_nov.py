@@ -175,6 +175,30 @@ class ReviewCases(unittest.TestCase):
             self.assertTrue(denied(pre(command)), command)
 
 
+class HostNames(unittest.TestCase):
+    """In the wild: DEV_ALLOWED_HOSTS held a tailnet host name, masked everywhere and
+    reported as an exposed secret to rotate."""
+
+    def host(self):
+        hex_ = "0123456789abcdef"
+        return corpus.j(corpus.rand(6, string.ascii_lowercase), "-pc-", corpus.rand(6, string.ascii_lowercase), ".tail",
+                        corpus.rand(6, hex_), ".ts.net")
+
+    def test_host_names_under_a_host_name_are_not_known_secrets(self):
+        host = self.host()
+        for line in (f"DEV_ALLOWED_HOSTS={host}", f"DEV_ALLOWED_HOSTS={host},other.local.example.com",
+                     f"CORS_ORIGINS=https://{host}:8002, https://app.example.com", f"PUBLIC_HOSTNAME={host}.",
+                     f"MAIL_DOMAIN=*.{host}"):
+            self.assertEqual(parse_env_text(line, 8), [], line)
+
+    def test_anything_else_there_still_counts(self):
+        token = corpus.rand(40)
+        for line in (f"DEV_ALLOWED_HOSTS={token}", f"ALLOWED_HOSTS={self.host()},{token}",
+                     f"DB_HOST=user:{token}@db.example.com", f"HOST_TOKEN={self.host()}", f"HOST_PASSWORD={self.host()}",
+                     f"ALLOWED_HOSTS={corpus.j(corpus.rand(30), '.', corpus.rand(30))}"):
+            self.assertTrue(parse_env_text(line, 8), line)
+
+
 class SshDepth(SshReads):
     def test_deep_nesting_is_refused_fast(self):
         import time

@@ -28,7 +28,10 @@ Detection has three layers:
    private, role or admin. Vite bundles every `VITE_*` variable into the page,
    so those count only when the name says secret (`VITE_API_PROXY_TOKEN`). A
    Sentry DSN only lets a client send events and ships in client code, so it is
-   public under any name. Word-like values and short lowercase labels under 12
+   public under any name. Host names under a name ending in `HOST(S)`,
+   `HOSTNAME`, `DOMAIN` or `ORIGIN(S)` (`DEV_ALLOWED_HOSTS`, `CORS_ORIGINS`) are
+   addresses, not credentials, unless the name also says secret: a long one looks
+   random enough to count otherwise. Word-like values and short lowercase labels under 12
    characters are left to the rules: an exact match would hide that word in
    every folder name and fixture. The regex is built per call from only the values that
    occur in the text, usually none, which keeps a hook call around 50ms.

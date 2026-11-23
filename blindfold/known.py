@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote
 
-from .rules import PLACEHOLDER_VALUE, PUBLIC_VALUE, is_public_name, is_secret_name, shannon_entropy
+from .rules import PLACEHOLDER_VALUE, PUBLIC_VALUE, is_public_name, name_segments, is_secret_name, shannon_entropy
 
 ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*[=:]\s*(.*?)\s*$")
 URL_PASSWORD = re.compile(r"^[a-z][a-z0-9+.-]*://[^:/@\s]*:([^@/\s]+)@", re.IGNORECASE)
@@ -34,6 +34,24 @@ _WORD_LIKE = re.compile(r"[A-Za-z]+[0-9]{0,4}")
 # A short lowercase label (two to four parts joined by _ or -): a dev stand-in, not a random key.
 _LABEL_LIKE = re.compile(r"[a-z]+(?:[_-][a-z]+){1,3}")
 _PASSWORD_NAME = re.compile(r"pass|pwd|pin", re.IGNORECASE)
+# Names that hold host names (DEV_ALLOWED_HOSTS, CORS_ORIGINS, MAIL_DOMAIN), and a host
+# name as written there: dot-separated labels ending in a letters-only top label,
+# maybe with a scheme or port. A random key never has this shape.
+_HOST_NAME_TAILS = frozenset("host hosts hostname hostnames domain domains origin origins".split())
+_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_HOST = re.compile(r"(?:https?://)?\*?\.?(?:" + _LABEL + r"\.)+[A-Za-z]{2,24}\.?(?::[0-9]{1,5})?/?")
+
+
+def is_host_list(name: str, value: str) -> bool:
+    """Host names under a host-name name, and nothing that says secret: public
+    addresses, not credentials, though long ones look random enough to count."""
+    segments = name_segments(name)
+    if not segments or segments[-1] not in _HOST_NAME_TAILS or is_secret_name(name, strong=True):
+        return False
+    items = [item.strip() for item in value.split(",")]
+    return all(item and _HOST.fullmatch(item) for item in items)
+
+
 # Word-like values shorter than this are left to the rules: an exact match would hide
 # that word wherever it shows up (a folder, a test fixture, an unrelated command).
 WEAK_MIN_LENGTH = 12
@@ -76,6 +94,8 @@ def is_weak(value: str) -> bool:
 
 def is_secret_value(name: str, value: str, min_length: int) -> bool:
     if not min_length <= len(value) <= MAX_KNOWN_LENGTH or is_public_name(name):
+        return False
+    if is_host_list(name, value):
         return False
     if PLACEHOLDER_VALUE.match(value) or PUBLIC_VALUE.fullmatch(value) or NUMBER.match(value) or PLAIN_URL.match(value) or ABSOLUTE_PATH.match(value):
         return False
