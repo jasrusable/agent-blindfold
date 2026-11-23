@@ -224,7 +224,8 @@ def strip_data_heredocs(command: str) -> str:
 # Interpreters whose here-document body is code in their own language, not shell commands.
 _CODE_INTERPRETER = re.compile(r"(?:python|pypy|node|nodejs|deno|bun|perl|ruby|php|lua)[\d.]*")
 # Searchers whose quoted arguments are patterns to look for, never commands.
-_SEARCHERS = frozenset(("grep", "egrep", "fgrep", "rg"))
+# Not rg: its --pre runs a command, and shell quoting can hide that option's name.
+_SEARCHERS = frozenset(("grep", "egrep", "fgrep"))
 # Quoted text the shell expands nothing in: single quotes, or double quotes without $, ` or \.
 _LITERAL_QUOTED = re.compile(r"'[^']*'|\"[^\"$`\\]*\"")
 
@@ -234,7 +235,7 @@ def strip_non_commands(command: str) -> str:
     text (blocked commands, environment dumps): strip_data_heredocs, and also the
     body of a here-document fed to a code interpreter (`python3 - <<'EOF'` runs
     Python, so `env` or `op read` in it is a string, not a command) and the quoted
-    patterns of grep and rg (`grep 'op read|vault'` searches for that text). Not
+    patterns of grep (`grep 'op read|vault'` searches for that text). Not
     for the file guards: an interpreter may still open a path its body names."""
     pairs = split(command)
     kept = []
@@ -257,7 +258,7 @@ def strip_non_commands(command: str) -> str:
             # Not a double-quoted "$(…)" or `…`: the shell runs that before grep sees it.
             # Literal quoted text only (the shell expands nothing in it), and only when
             # the part runs no substitution at all.
-            if not runs_substitution(part) and "--pre" not in part:
+            if not runs_substitution(part):
                 part = _LITERAL_QUOTED.sub("''", part)
         # Separators kept, so a pipe still reads as one (`env | cut -d= -f1`).
         kept.append(part + (f" {separator} " if separator.strip() else "\n"))

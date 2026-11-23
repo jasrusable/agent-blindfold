@@ -170,7 +170,8 @@ class ReviewCases(unittest.TestCase):
 
     def test_code_options_and_rg_pre_keep_the_checks(self):
         for command in (f"python3 -E - <<'EOF'\n{OP} read {OP}://v/i/f\nEOF", f"perl -n <<'EOF'\n{OP} read {OP}://v/i/f\nEOF",
-                        f"rg --pre 'sh -c \"{OP} read {OP}://v/i/f\"' x"):
+                        f"rg --pre 'sh -c \"{OP} read {OP}://v/i/f\"' x", f"rg --p\"re\" '{OP} read {OP}://v/i/f' x",
+                        f"rg '--pre={OP} read {OP}://v/i/f' x"):
             self.assertTrue(denied(pre(command)), command)
 
 
