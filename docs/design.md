@@ -171,7 +171,7 @@ use, and anything the split can't settle is judged as code. The same applies
 to the blocked commands: a heredoc saved to a file is data, while one piped
 into a shell is judged. For the blocked commands and environment dumps, which
 match command text, a heredoc fed to Python, Node, Ruby or Perl is code in that
-language and a grep or rg pattern is text searched for, so neither is judged
+language and a grep pattern is text searched for, so neither is judged
 (unless it runs a `$(…)`).
 
 `ssh host <command>` is judged by its remote command, as if it ran here: a
