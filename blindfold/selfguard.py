@@ -480,7 +480,7 @@ def _pipelines(segments: List[Tuple[str, str, str]]) -> List[str]:
     return [text[index] for index in range(len(segments))]
 
 
-def _command_reason(command: str, cwd: Optional[str], protected: List[str], settings: List[str]) -> Optional[str]:
+def _command_reason(command: str, cwd: Optional[str], protected: List[str], settings: List[str], depth: int = 0) -> Optional[str]:
     """Refuse a command that may write to a protected path or the agent
     settings. Readers (ls, cat, grep, git log, …) may name one; a redirection,
     a copier's destination or a variable may not point at one; any other
@@ -518,7 +518,11 @@ def _command_reason(command: str, cwd: Optional[str], protected: List[str], sett
             # What it feeds the remote command (a heredoc, a pipe) stays checked.
             remote = _ssh_remote([word.text for word in words[1:]])
             fed = body + (pipelines[index] if index > 0 and segments[index - 1][2] == "|" else "")
-            clean = remote and _command_reason(remote, None, protected, settings) is None and not _named(fed, guarded)
+            # Three hops deep is plenty; deeper is judged as code it can't follow (and stays fast).
+            clean = (
+                remote and depth < 3 and not _named(fed, guarded)
+                and _command_reason(remote, None, protected, settings, depth + 1) is None
+            )
             kind = "reader" if clean else "other"
         assignments = found.assignments + ([word for word in words[1:] if _ASSIGNMENT.match(word.text)] if kind == "assign" else [])
         risky_env = risky_env or any(_RISKY_ENV.match(word.text) for word in assignments)

@@ -108,7 +108,7 @@ def is_public_name(name: str) -> bool:
         return False
     # Vite bundles every VITE_ variable into the page, so one is public unless its name says secret.
     if segments[:1] == ["vite"]:
-        return not is_secret_name(name)
+        return not is_secret_name(name, strong=True)
     return bool({"public", "publishable"}.intersection(segments))
 
 

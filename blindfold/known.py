@@ -32,7 +32,8 @@ ABSOLUTE_PATH = re.compile(r"^(?:/|~/|\.{1,2}/|[A-Za-z]:\\)[^\s]*$")
 _PATH_OR_LABEL = re.compile(r"^[a-z0-9_.-]+(?:/[a-z0-9_.-]+)+$|\.(?:pem|key|crt|cer|p12|pfx|json|ya?ml|txt)$|^[a-z]+(?:[_-][a-z0-9]{1,12})+$")
 _WORD_LIKE = re.compile(r"[A-Za-z]+[0-9]{0,4}")
 # A short lowercase label (two to four parts joined by _ or -): a dev stand-in, not a random key.
-_LABEL_LIKE = re.compile(r"[a-z][a-z0-9]*(?:[_-][a-z0-9]+){1,3}")
+_LABEL_LIKE = re.compile(r"[a-z]+(?:[_-][a-z]+){1,3}")
+_PASSWORD_NAME = re.compile(r"pass|pwd|pin", re.IGNORECASE)
 # Word-like values shorter than this are left to the rules: an exact match would hide
 # that word wherever it shows up (a folder, a test fixture, an unrelated command).
 WEAK_MIN_LENGTH = 12
@@ -70,7 +71,7 @@ MAX_KNOWN_LENGTH = 8192
 
 
 def is_weak(value: str) -> bool:
-    return bool(_WORD_LIKE.fullmatch(value) or _LABEL_LIKE.fullmatch(value))
+    return bool(_WORD_LIKE.fullmatch(value))
 
 
 def is_secret_value(name: str, value: str, min_length: int) -> bool:
@@ -81,6 +82,10 @@ def is_secret_value(name: str, value: str, min_length: int) -> bool:
     # A short word-like value (postgres, development, password1) would hide that
     # word everywhere. Rules still mask it where it is assigned to a secret name.
     if is_weak(value) and len(value) < WEAK_MIN_LENGTH:
+        return False
+    # A short all-letter label (two to four words joined by _ or -) is a dev stand-in,
+    # unless it sits under a password name, where people do choose words.
+    if _LABEL_LIKE.fullmatch(value) and len(value) < WEAK_MIN_LENGTH and not _PASSWORD_NAME.search(name):
         return False
     if is_secret_name(name):
         return True

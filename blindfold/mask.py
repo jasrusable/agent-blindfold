@@ -189,7 +189,8 @@ class Masker:
             before = match.string[match.start() - 1 : match.start()]
             if ("/" in value and before in (".", "/", ":")) or before == "#":
                 return None
-            if _FILE_EXTENSION_AFTER.match(match.string, match.end()):
+            key = _KEY_BEFORE.search(match.string, max(0, match.start() - 80), match.start())
+            if _FILE_EXTENSION_AFTER.match(match.string, match.end()) and not (key and is_secret_name(key.group(1), strong=True)):
                 return None
             # The value of an id field ("fileId": "1AbC…"): an identifier, like a Drive file id.
             key = _KEY_BEFORE.search(match.string, max(0, match.start() - 80), match.start())

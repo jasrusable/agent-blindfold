@@ -245,10 +245,11 @@ def strip_non_commands(command: str) -> str:
         if saved:
             saved = not any(runs_file(pairs[index + 1 :], target) for target in write_targets(part))
         # Only when the body is the script (`python3 - <<EOF`, `node <<EOF`), not data for -c/-e code.
-        words_ = line.split()
+        # Only `<interpreter> [-]` (plus python's -u/-I/-B): any other option may pass code itself.
+        options = [w for w in line.split()[1:] if not w.startswith("<") and not w.startswith(">")]
         coded = (
             _CODE_INTERPRETER.fullmatch(name) and _HEREDOC.search(line) and not runs_substitution(part)
-            and not any(w in ("-c", "-e", "-p", "--eval", "--print", "-r") for w in words_)
+            and all(w in ("-", "-u", "-I", "-B") for w in options)
         )
         if saved or coded:
             part = line
@@ -256,7 +257,7 @@ def strip_non_commands(command: str) -> str:
             # Not a double-quoted "$(…)" or `…`: the shell runs that before grep sees it.
             # Literal quoted text only (the shell expands nothing in it), and only when
             # the part runs no substitution at all.
-            if not runs_substitution(part):
+            if not runs_substitution(part) and "--pre" not in part:
                 part = _LITERAL_QUOTED.sub("''", part)
         # Separators kept, so a pipe still reads as one (`env | cut -d= -f1`).
         kept.append(part + (f" {separator} " if separator.strip() else "\n"))

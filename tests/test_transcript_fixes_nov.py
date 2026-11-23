@@ -142,5 +142,45 @@ class SshReads(unittest.TestCase):
             self.assertTrue(self.reason(command), command)
 
 
+class ReviewCases(unittest.TestCase):
+    """What a fresh review of these fixes found they let through."""
+
+    def test_vite_key_names_stay_secret(self):
+        value = corpus.rand(24)
+        for name in ("VITE_OPENAI_KEY", "VITE_STRIPE_KEY", "VITE_SUPABASE_KEY"):
+            self.assertEqual([s.name for s in parse_env_text(f"{name}={value}", 8)], [name])
+
+    def test_word_passwords_and_tokens_stay_secret(self):
+        for line in ("DB_PASSWORD=" + corpus.j("red", "-fox-", "42"), "POSTGRES_PASSWORD=" + corpus.j("hunter", "_22"),
+                     "API_TOKEN=" + corpus.j("k3j9", "-x82mq1")):
+            self.assertTrue(parse_env_text(line, 8), line)
+
+    def test_random_keys_in_image_and_pdf_text_are_masked(self):
+        key = corpus.rand(40)
+        chunk = b"Comment\x00" + key.encode()
+        png = b"\x89PNG\r\n\x1a\n" + len(chunk).to_bytes(4, "big") + b"tEXt" + chunk + bytes(4)
+        pdf = b"%PDF-1.4\nBT (" + key.encode() + b") Tj ET\n"
+        for raw in (png, pdf):
+            out, findings = mask_value(M, {"type": "image", "file": {"base64": base64.b64encode(raw).decode()}})
+            self.assertTrue(findings, raw[:8])
+
+    def test_a_secret_named_value_before_an_extension_is_masked(self):
+        token = corpus.rand(40)
+        self.assertTrue(masked(f"TOKEN={token}.json"))
+
+    def test_code_options_and_rg_pre_keep_the_checks(self):
+        for command in (f"python3 -E - <<'EOF'\n{OP} read {OP}://v/i/f\nEOF", f"perl -n <<'EOF'\n{OP} read {OP}://v/i/f\nEOF",
+                        f"rg --pre 'sh -c \"{OP} read {OP}://v/i/f\"' x"):
+            self.assertTrue(denied(pre(command)), command)
+
+
+class SshDepth(SshReads):
+    def test_deep_nesting_is_refused_fast(self):
+        import time
+        start = time.monotonic()
+        self.assertTrue(self.reason("ssh h " * 800 + f"rm {self.settings}"))
+        self.assertLess(time.monotonic() - start, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
