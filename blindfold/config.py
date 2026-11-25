@@ -17,6 +17,8 @@ KEY_PATH = os.path.join(CONFIG_DIR, "fingerprint.key")
 # known secrets would mask fixtures and make the write guard refuse test edits.
 _ENV_NAMES = [
     ".env", ".env.local", ".env.*.local", ".env.production", ".env.staging", ".env.development", ".envrc", ".envrc.local",
+    # blindfold env-set's backups: the file before a replace.
+    ".env*.blindfold-bak",
 ]
 _ENV_DIRS = ["~", "~/projects/*", "~/projects/*/*", "~/projects/*/worktrees/*/*"]
 DEFAULT_SOURCES = ["~/.config/*/*.env", "~/.config/*/.env"] + [f"{d}/{n}" for d in _ENV_DIRS for n in _ENV_NAMES]

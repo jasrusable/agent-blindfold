@@ -11,6 +11,7 @@ quoting tricks get past any denylist.
 import fnmatch
 import os
 import re
+import shutil
 from typing import Any, Iterable, List, Optional
 
 from . import shell
@@ -50,6 +51,9 @@ DEFAULT_PROTECTED_FILES = [
     "*.p8",
     ".netrc",
     ".netrc.gpg",
+    # blindfold env-set's backups and temporary files: copies of a secret file.
+    "*.blindfold-bak",
+    "*.blindfold-tmp*",
 ]
 # Committed templates hold fake values.
 _TEMPLATE = re.compile(r"\.(?:example|sample|template|dist|test)$", re.IGNORECASE)
@@ -146,10 +150,24 @@ def _scan_bypass(texts: List[str]) -> Optional[str]:
     return None
 
 
-def _is_env_set(texts: List[str]) -> bool:
-    """`blindfold env-set FILE KEY VALUE`: writes one line and never shows the file."""
+_DEFINES_LAUNCHER = re.compile(r"(?:^|[\s;&|(])(?:function\s+)?blindfold\s*\(\s*\)|\b(?:alias|function)\s+blindfold\b")
+
+
+def _launcher(program: str) -> bool:
+    """Whether a command word runs this blindfold, not a script of the same name."""
+    found = shutil.which(program) if "/" not in program else os.path.expanduser(program)
+    return bool(found) and os.path.realpath(found) == os.path.realpath(LAUNCHER)
+
+
+def _is_env_set(parsed: List[shell.Word], part: str, command: str) -> bool:
+    """`blindfold env-set FILE KEY VALUE` and nothing else: it writes one line and
+    never shows the file. Not with a redirection (it would write the file
+    itself), a substitution of any kind, or a `blindfold` the command defines."""
+    if any(word.op or word.dynamic for word in parsed) or shell.runs_substitution(part) or "=(" in part:
+        return False
+    texts = [word.text for word in parsed]
     args = [text for text in texts[1:] if not text.startswith("-")]
-    return bool(texts) and os.path.basename(texts[0]) == "blindfold" and args[:1] == ["env-set"]
+    return bool(texts) and args[:1] == ["env-set"] and _launcher(texts[0]) and not _DEFINES_LAUNCHER.search(command)
 
 
 def _word_reason(text: str, cwd: Optional[str], patterns: List[str], config: Config, depth: int) -> Optional[str]:
@@ -164,7 +182,7 @@ def _word_reason(text: str, cwd: Optional[str], patterns: List[str], config: Con
             if config.block_env_dumps and any(re.match(r"^/proc/(?:self|\d+|\$\$|\*)/environ$", t) for t in texts):
                 return ENV_DUMP_REASON
             head = shell.head(part)
-            if head not in _HARMLESS_HEADS and not (_is_env_set(texts) and not shell.runs_substitution(part)):
+            if head not in _HARMLESS_HEADS and not (not parsed[1] and _is_env_set(parsed[0], part, text)):
                 for word in texts[1:] if texts else []:
                     candidates = [word] + ([word.split("=", 1)[1]] if "=" in word else [])
                     for candidate in candidates:

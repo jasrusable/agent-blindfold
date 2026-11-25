@@ -97,22 +97,37 @@ Masking runs on everything, but some calls are refused outright:
   rules, recorded in `~/.config/blindfold/install-state.json` so a reinstall
   updates only its own rules.
 - **Setting a line in a secret file:** `blindfold env-set FILE KEY VALUE` is
-  the one way an agent changes a dotenv file (`.env`, `.env.*`, `*.env`,
-  `.envrc`) it may not read; Edit and Write on a protected file stay refused.
-  The guard is about reading, not writing, so this command may name a
-  protected file (unless it runs a `$(…)`). It:
-  - refuses a value the masker flags (rules, entropy and known values), so a
-    secret never goes in through it;
-  - never replaces a value that looks like a secret by the rules and entropy,
-    or that is a known value under another name. Known values under the same
-    name don't count: every value in a dotenv file is one. So there's no
-    backup, and secrets stay the user's to change;
-  - refuses a key set twice, a value over several lines, and blindfold's own
-    files and the agent settings, by their real paths;
-  - keeps an `export ` prefix and the file's mode, writes through symlinks and
-    atomically, and makes a new file `0600`;
+  the one way an agent changes a dotenv file (`.env`, `.env.*`, `*.env`) it
+  may not read; Edit and Write on a protected file stay refused. The guard is
+  about reading, not writing, so this command may name a protected file, but
+  only when its first word is this blindfold's launcher (not a script or
+  function of that name) and it has no redirection, variable, glob or
+  substitution (`$(…)`, backticks, `<(…)`, `=(…)`). It:
+  - refuses a value the masker flags (rules, entropy and known values), and a
+    value with a line break or control character;
+  - refuses keys that change what programs run (`PATH`, `LD_*`, `DYLD_*`,
+    `NODE_OPTIONS`, `PYTHON*`, `GIT_*`, `BLINDFOLD_*` and the like), and runs
+    only with `BLINDFOLD_CONFIG` and `BLINDFOLD_HOME` unset, so the checks
+    are the user's;
+  - won't replace a key named like a secret, or a value that looks like one by
+    the rules and entropy or is a known value under another name (every value
+    in a dotenv file is a known value under its own name, so that alone
+    doesn't count). No rule can be sure, so before a replace it keeps the
+    previous file as `FILE.blindfold-bak` (`0600`). Backups and its temporary
+    files are protected names agents can't read, and backups are known-secret
+    files;
+  - reads lines the way dotenv parsers do: ended by `\n` only, skipping lines
+    inside a quoted value over several lines. It refuses a quote left open, a
+    key set twice, a `KEY: value` line, `.envrc` (shell code, not data), and
+    blindfold's own files (this copy's and the installed one's) and the agent
+    settings, by their real paths;
+  - keeps an `export ` prefix, `\r\n` endings and the file's mode, writes
+    through symlinks and atomically (which replaces hard links and drops
+    extended attributes), and makes a new file `0600`. A replaced line loses
+    its trailing comment;
   - prints only `KEY added`, `KEY replaced` or `KEY unchanged`, never a line of
-    the file.
+    the file. `unchanged` does confirm a guess of a value, once: a wrong guess
+    replaces it.
 - **Secret-scan bypass:** `--no-verify`, `git commit -n`, `HUSKY=0`, and a
   `core.hooksPath` override or unset (setting it back to `.husky` is fine).
   `block_secret_scan_bypass: false` turns this off.

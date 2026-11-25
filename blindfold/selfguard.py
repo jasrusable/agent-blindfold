@@ -67,9 +67,7 @@ _WRAPPERS = {
 }
 _CHDIR = {"env": ("-C", "--chdir"), "sudo": ("-D", "--chdir")}
 _KEYWORDS = frozenset("if then else elif fi do done while until { } ! esac".split())
-# env-set writes, but refuses blindfold's own files and the agent settings itself,
-# by their real paths, which is surer than following the command's words.
-_LAUNCHER_READS = ("doctor", "scan", "hook", "selftest", "env-set")
+_LAUNCHER_READS = ("doctor", "scan", "hook", "selftest")
 _GIT_READS = frozenset(
     "status log show diff rev-parse describe ls-files ls-tree ls-remote blame grep cat-file rev-list shortlog "
     "show-ref for-each-ref name-rev merge-base whatchanged show-branch count-objects check-ignore check-attr var "
@@ -326,6 +324,12 @@ def _ssh_remote(texts: List[str]) -> Optional[str]:
     return " ".join(rest) if at < len(texts) and rest else None
 
 
+def _real_launcher(program: str) -> bool:
+    from .guards import _launcher
+
+    return _launcher(program)
+
+
 def _kind(words: List[Word]) -> str:
     """How the command treats its arguments (see _READERS)."""
     if not words:
@@ -335,6 +339,10 @@ def _kind(words: List[Word]) -> str:
     if name == "blindfold":
         first = [text for text in texts if not text.startswith("-")][:1]
         reads = first and (first[0] in _LAUNCHER_READS or (first[0] == "install" and "--apply" not in texts))
+        # env-set writes, but refuses blindfold's own files and the agent settings
+        # itself, by their real paths: surer than following the command's words.
+        # Only the real launcher, not a script of that name.
+        reads = reads or (first == ["env-set"] and _real_launcher(words[0].text))
         return "launcher" if reads else "other"
     if name == "sed":
         return _sed_kind(texts)

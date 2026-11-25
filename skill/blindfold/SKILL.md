@@ -55,9 +55,9 @@ and withheld everything. Re-run, or ask the user.
   yourself.
 - **To set a line that isn't secret** in a dotenv file you may not read (a
   feature flag, a list of public app ids), run `blindfold env-set FILE KEY VALUE`
-  (the launcher the session note names). It adds or replaces the line and says
-  only which. It refuses a value that looks like a secret, and won't replace
-  one: those are the user's.
+  with the full launcher path the session note names. It adds or replaces the
+  line and says only which. It refuses a value that looks like a secret, and
+  won't replace one: those are the user's.
 - **Keep placeholders out of files.** If you edit a file containing a
   placeholder, leave that line alone. Writing a placeholder would replace the
   real secret with blindfold's text, and the write is refused anyway.

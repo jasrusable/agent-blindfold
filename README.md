@@ -80,7 +80,7 @@ that, keep secrets off disk (for example `op run` with `op://` references).
 |---------|------|
 | `blindfold doctor` | Shows config, the secret files found and install state, and exits 1 if the hooks don't fail closed. Never prints values. |
 | `blindfold scan [file]` | Masks a file or stdin. |
-| `blindfold env-set FILE KEY VALUE` | Adds or replaces one `KEY=VALUE` line in a dotenv file and prints only the key and what happened. Refuses a value that looks like a secret, and never replaces one. |
+| `blindfold env-set FILE KEY VALUE` | Adds or replaces one `KEY=VALUE` line in a dotenv file and prints only the key and what happened. Refuses a value that looks like a secret, won't replace one, and keeps the previous file as `FILE.blindfold-bak`. |
 | `blindfold selftest` | Canary tests, optionally through a real agent. `--installed` tests the hooks your agents actually run; without it, this checkout's. `--fail-closed` adds real sessions with a hook that can't start and with PATH emptied. |
 
 ## Configuration

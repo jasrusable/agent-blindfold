@@ -256,9 +256,9 @@ def cmd_env_set(args) -> int:
     except Refused as refusal:
         print(f"blindfold: refused: {refusal}", file=sys.stderr)
         return 1
-    except OSError as error:
-        # The type only: an error's text is never needed here.
-        print(f"blindfold: couldn't write {args.file} ({type(error).__name__})", file=sys.stderr)
+    except Exception as error:  # noqa: BLE001
+        # The type only: an error's text can quote the file (a decode error names a byte).
+        print(f"blindfold: couldn't set {args.key} in {args.file} ({type(error).__name__})", file=sys.stderr)
         return 1
     return 0
 
