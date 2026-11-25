@@ -324,6 +324,12 @@ def _ssh_remote(texts: List[str]) -> Optional[str]:
     return " ".join(rest) if at < len(texts) and rest else None
 
 
+def _real_launcher(program: str) -> bool:
+    from .guards import _launcher
+
+    return _launcher(program)
+
+
 def _kind(words: List[Word]) -> str:
     """How the command treats its arguments (see _READERS)."""
     if not words:
@@ -333,6 +339,10 @@ def _kind(words: List[Word]) -> str:
     if name == "blindfold":
         first = [text for text in texts if not text.startswith("-")][:1]
         reads = first and (first[0] in _LAUNCHER_READS or (first[0] == "install" and "--apply" not in texts))
+        # env-set writes, but refuses blindfold's own files and the agent settings
+        # itself, by their real paths: surer than following the command's words.
+        # Only the real launcher, not a script of that name.
+        reads = reads or (first == ["env-set"] and _real_launcher(words[0].text))
         return "launcher" if reads else "other"
     if name == "sed":
         return _sed_kind(texts)

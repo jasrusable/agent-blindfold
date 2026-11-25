@@ -12,6 +12,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional
 
 from .bash import MARKER, unwrappable, wrap
+from .cli_paths import LAUNCHER
 from .events import Event
 from .mask import PLACEHOLDER_RE, Finding
 from .rules import PROMPT_BLOCKING_KINDS
@@ -41,10 +42,10 @@ Rules:
 2. Never try to recover a masked value: no re-reading another way (cat, head -c, xxd, od, strings, sed, base64, rev, tr, cut, a few characters at a time), no encoding, splitting or hashing to slip past the mask, no subagent or script to repeat it, no guessing from length, id or context.
 3. Never write a placeholder into a file or command (it would replace the real secret; blindfold refuses it). Edit around masked parts.
 4. Never disable, reconfigure or bypass blindfold yourself. blindfold refuses agent changes to its own code, config, key, skill and hook settings; the user makes those.
-5. Some calls are refused outright: environment dumps (printenv, env, direnv export), echoing a credential variable, reading secret files (.envrc, ~/.config/*/*.env, *.p8, .netrc), and switching off the commit hooks' secret scan (--no-verify, git commit -n, HUSKY=0). Don't work around a refusal; check by name, presence or length instead, or ask the user. If blindfold itself fails, it refuses every call: tell the user to run `blindfold doctor`.
+5. Some calls are refused outright: environment dumps (printenv, env, direnv export), echoing a credential variable, reading secret files (.envrc, ~/.config/*/*.env, *.p8, .netrc), and switching off the commit hooks' secret scan (--no-verify, git commit -n, HUSKY=0). To set a line that isn't secret in a .env file without seeing the file, run `@LAUNCHER@ env-set FILE KEY VALUE`. Don't work around a refusal; check by name, presence or length instead, or ask the user. If blindfold itself fails, it refuses every call: tell the user to run `blindfold doctor`.
 5. If a task needs a value you can't see, stop and ask the user, who can usually run one command.
 6. False positive (something clearly not secret was masked): explain it, then propose the narrowest override, its id in allow_ids or a rule in disabled_rules in ~/.config/blindfold/config.json, and give the user the exact command to make it; you can't edit that file. Never propose allowing env:* kinds.
-7. If a real secret's value is visible to you anywhere (a tool result blindfold missed, a user message, your own output), start your reply with "⚠️ SECRET EXPOSED: <name or kind>, seen in <where>. It reached the model provider and should be rotated." Never repeat the value. Name what to rotate."""
+7. If a real secret's value is visible to you anywhere (a tool result blindfold missed, a user message, your own output), start your reply with "⚠️ SECRET EXPOSED: <name or kind>, seen in <where>. It reached the model provider and should be rotated." Never repeat the value. Name what to rotate.""".replace("@LAUNCHER@", LAUNCHER)
 
 
 def summarize(findings: List[Finding]) -> str:

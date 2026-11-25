@@ -14,7 +14,8 @@ import re
 from typing import Any, Iterable, List, Optional
 
 from . import shell
-from .config import _COMMAND_START, Config
+from .cli_paths import LAUNCHER
+from .config import _COMMAND_START, CONFIG_DIR, Config
 
 # Prints every variable, or the values a tool loads from a secret file.
 _END = r"[ \t]*(?:$|[|;&)`>]|\d>|<)"
@@ -49,6 +50,9 @@ DEFAULT_PROTECTED_FILES = [
     "*.p8",
     ".netrc",
     ".netrc.gpg",
+    # blindfold env-set's backups and temporary files: copies of a secret file.
+    os.path.join(CONFIG_DIR, "backups", "*"),
+    "*.blindfold-tmp*",
 ]
 # Committed templates hold fake values.
 _TEMPLATE = re.compile(r"\.(?:example|sample|template|dist|test)$", re.IGNORECASE)
@@ -74,7 +78,8 @@ CREDENTIAL_ECHO_REASON = (
 )
 PROTECTED_FILE_REASON = (
     "blindfold: {path} is a secret file, so agents don't read, edit or print it, even masked. Refer to its "
-    "variables by name, or ask the user to make the change (they can type `! <command>`)."
+    "variables by name. To set a line that isn't secret, run `{launcher} env-set FILE KEY VALUE`; for anything "
+    "else, ask the user to make the change (they can type `! <command>`)."
 )
 SCAN_BYPASS_REASON = (
     "blindfold: this command switches off the git hooks that scan commits for secrets ({how}). Fix what the hook "
@@ -144,6 +149,27 @@ def _scan_bypass(texts: List[str]) -> Optional[str]:
     return None
 
 
+def _launcher(program: str) -> bool:
+    """Whether a command word is this blindfold's launcher by absolute path. A
+    bare name could run anything the command's own PATH, hash table or
+    functions point it at."""
+    expanded = os.path.expanduser(program)
+    return os.path.isabs(expanded) and os.path.realpath(expanded) == os.path.realpath(LAUNCHER)
+
+
+def _is_env_set(parsed: List[shell.Word], part: str, command: str) -> bool:
+    """`<launcher> env-set FILE KEY VALUE` as the whole command: it writes one
+    line and never shows the file. Not with anything before or after it (which
+    could redefine what runs), a redirection (it would write the file itself),
+    or a variable, glob or substitution of any kind."""
+    if len(shell.segments(command)) != 1 or part.strip() != command.strip():
+        return False
+    if any(word.op or word.dynamic for word in parsed) or shell.runs_substitution(part) or "=(" in part:
+        return False
+    texts = [word.text for word in parsed]
+    return len(texts) == 5 and texts[1] == "env-set" and _launcher(texts[0])
+
+
 def _word_reason(text: str, cwd: Optional[str], patterns: List[str], config: Config, depth: int) -> Optional[str]:
     for part, body, _ in shell.segments(text):
         parsed = shell.words(part)
@@ -156,12 +182,12 @@ def _word_reason(text: str, cwd: Optional[str], patterns: List[str], config: Con
             if config.block_env_dumps and any(re.match(r"^/proc/(?:self|\d+|\$\$|\*)/environ$", t) for t in texts):
                 return ENV_DUMP_REASON
             head = shell.head(part)
-            if head not in _HARMLESS_HEADS:
+            if head not in _HARMLESS_HEADS and not (not parsed[1] and _is_env_set(parsed[0], part, text)):
                 for word in texts[1:] if texts else []:
                     candidates = [word] + ([word.split("=", 1)[1]] if "=" in word else [])
                     for candidate in candidates:
                         if protected_match(candidate, patterns, cwd):
-                            return PROTECTED_FILE_REASON.format(path=candidate)
+                            return PROTECTED_FILE_REASON.format(path=candidate, launcher=LAUNCHER)
         # A body still here is one that may run (strip_data_heredocs kept it).
         if body and depth < 3:
             found = _word_reason(body, cwd, patterns, config, depth + 1)
@@ -191,7 +217,7 @@ def reason(tool_input: Any, cwd: Optional[str], config: Config) -> Optional[str]
     for key in _PATH_KEYS:
         value = tool_input.get(key)
         if isinstance(value, str) and protected_match(value, patterns, cwd):
-            return PROTECTED_FILE_REASON.format(path=value)
+            return PROTECTED_FILE_REASON.format(path=value, launcher=LAUNCHER)
     return None
 
 

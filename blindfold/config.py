@@ -19,7 +19,9 @@ _ENV_NAMES = [
     ".env", ".env.local", ".env.*.local", ".env.production", ".env.staging", ".env.development", ".envrc", ".envrc.local",
 ]
 _ENV_DIRS = ["~", "~/projects/*", "~/projects/*/*", "~/projects/*/worktrees/*/*"]
-DEFAULT_SOURCES = ["~/.config/*/*.env", "~/.config/*/.env"] + [f"{d}/{n}" for d in _ENV_DIRS for n in _ENV_NAMES]
+# blindfold env-set's backups: a dotenv file before a replace.
+BACKUP_DIR = os.path.join(CONFIG_DIR, "backups")
+DEFAULT_SOURCES = ["~/.config/*/*.env", "~/.config/*/.env", os.path.join(BACKUP_DIR, "*")] + [f"{d}/{n}" for d in _ENV_DIRS for n in _ENV_NAMES]
 
 
 # macOS Keychain reads that print the password, and 1Password reads. Matched in

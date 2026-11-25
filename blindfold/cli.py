@@ -1,4 +1,4 @@
-"""Command line: blindfold hook | scan | doctor | install | selftest."""
+"""Command line: blindfold hook | scan | doctor | install | env-set | selftest."""
 
 import argparse
 import difflib
@@ -248,6 +248,21 @@ def hook_problems(settings: Dict[str, Any]) -> List[str]:
     return problems
 
 
+def cmd_env_set(args) -> int:
+    from .envset import Refused, set_line
+
+    try:
+        print(set_line(args.file, args.key, args.value))
+    except Refused as refusal:
+        print(f"blindfold: refused: {refusal}", file=sys.stderr)
+        return 1
+    except Exception as error:  # noqa: BLE001
+        # The type only: an error's text can quote the file (a decode error names a byte).
+        print(f"blindfold: couldn't set {args.key} in {args.file} ({type(error).__name__})", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_selftest(args) -> int:
     from .selftest import run
 
@@ -265,6 +280,12 @@ def main(argv=None) -> int:
     install = sub.add_parser("install", help="add blindfold's hooks and skill (dry run unless --apply)")
     install.add_argument("--agent", dest="agents", action="append", choices=sorted(TARGETS))
     install.add_argument("--apply", action="store_true")
+    env_set = sub.add_parser(
+        "env-set", help="add or replace one non-secret KEY=VALUE line in a dotenv file, without showing the file"
+    )
+    env_set.add_argument("file")
+    env_set.add_argument("key")
+    env_set.add_argument("value")
     selftest = sub.add_parser("selftest", help="canary tests; --agent runs them through a real agent")
     selftest.add_argument("--agent", dest="agents", action="append", choices=sorted(TARGETS))
     selftest.add_argument(
@@ -275,7 +296,7 @@ def main(argv=None) -> int:
         help="with --agent: also run real sessions with a hook that can't start and with PATH emptied",
     )
     args = parser.parse_args(argv)
-    commands = {"hook": lambda _a: hook_main(), "scan": cmd_scan, "doctor": cmd_doctor, "install": cmd_install, "selftest": cmd_selftest}
+    commands = {"hook": lambda _a: hook_main(), "scan": cmd_scan, "doctor": cmd_doctor, "install": cmd_install, "selftest": cmd_selftest, "env-set": cmd_env_set}
     if args.command is None:
         parser.print_help()
         return 2
