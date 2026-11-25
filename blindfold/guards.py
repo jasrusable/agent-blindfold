@@ -11,12 +11,11 @@ quoting tricks get past any denylist.
 import fnmatch
 import os
 import re
-import shutil
 from typing import Any, Iterable, List, Optional
 
 from . import shell
 from .cli_paths import LAUNCHER
-from .config import _COMMAND_START, Config
+from .config import _COMMAND_START, CONFIG_DIR, Config
 
 # Prints every variable, or the values a tool loads from a secret file.
 _END = r"[ \t]*(?:$|[|;&)`>]|\d>|<)"
@@ -52,7 +51,7 @@ DEFAULT_PROTECTED_FILES = [
     ".netrc",
     ".netrc.gpg",
     # blindfold env-set's backups and temporary files: copies of a secret file.
-    "*.blindfold-bak",
+    os.path.join(CONFIG_DIR, "backups", "*"),
     "*.blindfold-tmp*",
 ]
 # Committed templates hold fake values.
@@ -150,24 +149,25 @@ def _scan_bypass(texts: List[str]) -> Optional[str]:
     return None
 
 
-_DEFINES_LAUNCHER = re.compile(r"(?:^|[\s;&|(])(?:function\s+)?blindfold\s*\(\s*\)|\b(?:alias|function)\s+blindfold\b")
-
-
 def _launcher(program: str) -> bool:
-    """Whether a command word runs this blindfold, not a script of the same name."""
-    found = shutil.which(program) if "/" not in program else os.path.expanduser(program)
-    return bool(found) and os.path.realpath(found) == os.path.realpath(LAUNCHER)
+    """Whether a command word is this blindfold's launcher by absolute path. A
+    bare name could run anything the command's own PATH, hash table or
+    functions point it at."""
+    expanded = os.path.expanduser(program)
+    return os.path.isabs(expanded) and os.path.realpath(expanded) == os.path.realpath(LAUNCHER)
 
 
 def _is_env_set(parsed: List[shell.Word], part: str, command: str) -> bool:
-    """`blindfold env-set FILE KEY VALUE` and nothing else: it writes one line and
-    never shows the file. Not with a redirection (it would write the file
-    itself), a substitution of any kind, or a `blindfold` the command defines."""
+    """`<launcher> env-set FILE KEY VALUE` as the whole command: it writes one
+    line and never shows the file. Not with anything before or after it (which
+    could redefine what runs), a redirection (it would write the file itself),
+    or a variable, glob or substitution of any kind."""
+    if len(shell.segments(command)) != 1 or part.strip() != command.strip():
+        return False
     if any(word.op or word.dynamic for word in parsed) or shell.runs_substitution(part) or "=(" in part:
         return False
     texts = [word.text for word in parsed]
-    args = [text for text in texts[1:] if not text.startswith("-")]
-    return bool(texts) and args[:1] == ["env-set"] and _launcher(texts[0]) and not _DEFINES_LAUNCHER.search(command)
+    return len(texts) == 5 and texts[1] == "env-set" and _launcher(texts[0])
 
 
 def _word_reason(text: str, cwd: Optional[str], patterns: List[str], config: Config, depth: int) -> Optional[str]:

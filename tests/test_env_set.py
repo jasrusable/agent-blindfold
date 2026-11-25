@@ -30,6 +30,10 @@ class EnvSet(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="envset-")
         self.env = os.path.join(self.dir, DOT_ENV)
         self.rt = build_runtime(CFG, environ={})
+        self.backups = os.path.join(self.dir, "backups")
+        patcher = mock.patch("blindfold.config.BACKUP_DIR", self.backups)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -57,7 +61,7 @@ class EnvSet(unittest.TestCase):
         self.assertEqual(result, f"APP_AUDIENCES added to {self.env}")
         self.assertEqual(self.read(), f"STRIPE_SECRET_KEY={STRIPE}\nDEBUG=1\nAPP_AUDIENCES=com.example.app,com.example.app.dev\n")
         self.assertEqual(stat.S_IMODE(os.stat(self.env).st_mode), 0o640)
-        self.assertFalse(os.path.exists(self.env + envset.BACKUP_SUFFIX))
+        self.assertFalse(os.path.exists(self.backups))
 
     def test_replaces_a_line_keeping_a_private_backup(self):
         before = "A=1\r\nexport LOG_LEVEL=warning-and-up\r\nB=2\r\n"
@@ -66,10 +70,21 @@ class EnvSet(unittest.TestCase):
         self.assertTrue(result.startswith(f"LOG_LEVEL replaced in {self.env}"))
         self.assertNotIn("warning", result)
         self.assertEqual(self.read(), "A=1\r\nexport LOG_LEVEL='debug mode'\r\nB=2\r\n")
-        backup = self.env + envset.BACKUP_SUFFIX
+        [backup] = [os.path.join(self.backups, n) for n in os.listdir(self.backups)]
         self.assertEqual(self.read(backup), before)
+        self.assertIn(backup, result)
         self.assertEqual(stat.S_IMODE(os.stat(backup).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(self.backups).st_mode), 0o700)
         self.assertEqual(self.set("LOG_LEVEL", "debug mode"), f"LOG_LEVEL unchanged in {self.env}")
+        # A later replace keeps its own backup; the first is never overwritten.
+        self.set("A", "2")
+        self.set("A", "3")
+        contents = sorted(self.read(os.path.join(self.backups, n)) for n in os.listdir(self.backups))
+        self.assertEqual(len(contents), 3)
+        self.assertIn(before, contents)
+        # A key added to a CRLF file keeps CRLF.
+        self.set("C", "4")
+        self.assertTrue(self.read().endswith("C=4\r\n"))
 
     def test_a_value_that_looks_secret_is_refused(self):
         self.write("DEBUG=1\n")
@@ -124,6 +139,7 @@ class EnvSet(unittest.TestCase):
             ("BLINDFOLD_CONFIG", "/tmp/x.json", self.env),
             ("B", "x", os.path.join(self.dir, "config.json")),
             ("B", "x", os.path.join(self.dir, ".envrc")),
+            ("B", "x", os.path.join(self.dir, ".env.blindfold-tmpab12")),
         ]
         for key, value, path in cases:
             with self.subTest(key=key, value=value):
@@ -199,9 +215,13 @@ class Guards(unittest.TestCase):
             f"{LAUNCHER} env-set .envrc K =(cat .envrc)",
             f"{LAUNCHER} env-set .envrc K $X",
             "/tmp/x/blindfold env-set .envrc K V",
+            "blindfold env-set .envrc K V",
             f"blindfold() {{ cat \"$2\"; }}; {LAUNCHER} env-set .envrc K V",
             f"alias blindfold=cat; {LAUNCHER} env-set .envrc K V",
-            "cat .env.blindfold-bak",
+            "export PATH=/tmp/x:$PATH; blindfold env-set .envrc K V",
+            f"cd /tmp && {LAUNCHER} env-set .envrc K V",
+            f"{LAUNCHER} env-set .envrc K V extra",
+            "cat ~/.config/blindfold/backups/x",
             "cat .env.blindfold-tmpab12",
         ):
             with self.subTest(command=command):

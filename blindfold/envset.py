@@ -5,15 +5,17 @@ that is not secret (a list of public app ids, a feature flag). This writes
 `KEY=VALUE` and reports only the key and what happened, never the file's
 contents or the value it replaced. It refuses a value that looks like a
 secret, by the same rules the masker uses. No rule can be sure an old value
-isn't a secret, so before replacing one it keeps the previous file beside it
-as FILE.blindfold-bak, a protected name agents can't read. Nothing here may
-print a line of the file.
+isn't a secret, so before replacing one it keeps the previous file in
+blindfold's config folder (backups/), outside any repository, where agents may
+not read it and never overwritten. Nothing here may print a line of the file.
 """
 
+import hashlib
 import os
 import re
 import stat
 import tempfile
+import time
 from typing import List, Optional, Tuple
 
 from .runtime import load_runtime
@@ -32,10 +34,8 @@ _PLAIN = re.compile(r"[A-Za-z0-9_./:,@+%-]*")
 # Control characters and the Unicode line and paragraph separators.
 _UNSAFE_CHARS = re.compile(r"[\x00-\x1f\x7f\x85  ]")
 _ASSIGNMENT = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_.-]*)\s*([=:])")
-BACKUP_SUFFIX = ".blindfold-bak"
+# A temporary file holds a copy of the file until it lands, so agents may not read it (see guards).
 _TEMP_SUFFIX = ".blindfold-tmp"
-# These hold a copy of the file, so agents may not read them either (see guards).
-PROTECTED_COPIES = ["*" + BACKUP_SUFFIX, "*" + _TEMP_SUFFIX + "*"]
 
 
 class Refused(Exception):
@@ -130,7 +130,7 @@ def set_line(path: str, key: str, value: str, runtime=None, environ=None) -> str
     if _UNSAFE_CHARS.search(value):
         raise Refused("the value has a line break or control character; ask the user to set it")
     real = os.path.realpath(os.path.expanduser(path))
-    if not _DOTENV_NAME.match(os.path.basename(real)):
+    if not _DOTENV_NAME.match(os.path.basename(real)) or _TEMP_SUFFIX in os.path.basename(real):
         raise Refused(f"{path} isn't a dotenv file (.env, .env.*, *.env)")
     if _protected_target(real):
         raise Refused(f"{path} is part of blindfold or the agent's settings")
@@ -166,15 +166,34 @@ def set_line(path: str, key: str, value: str, runtime=None, environ=None) -> str
         if old == new:
             return f"{key} unchanged in {path}"
         lines[at] = new
-        _write(real + BACKUP_SUFFIX, text, 0o600)
-        result = f"{key} replaced in {path} (previous file kept as {os.path.basename(real)}{BACKUP_SUFFIX})"
+        backup = _backup(real, text)
+        result = f"{key} replaced in {path} (previous file kept as {backup})"
     else:
         if lines[-1] == "":
             lines.pop()
-        lines += [line, ""]
+        lines += [line + ("\r" if text.split("\n", 1)[0].endswith("\r") else ""), ""]
         result = f"{key} added to {path}" + ("" if exists else " (new file)")
     _write(real, "\n".join(lines), stat.S_IMODE(os.stat(real).st_mode) if exists else 0o600)
     return result
+
+
+def _backup(path: str, text: str) -> str:
+    """Keep the file as it was, under a new name each time; returns the path."""
+    from .config import BACKUP_DIR
+
+    if _protected_target(os.path.realpath(path)) or os.path.realpath(path).startswith(os.path.realpath(BACKUP_DIR) + os.sep):
+        raise Refused("that file is one of blindfold's own")
+    os.makedirs(BACKUP_DIR, mode=0o700, exist_ok=True)
+    os.chmod(BACKUP_DIR, 0o700)
+    tag = hashlib.sha256(path.encode("utf-8")).hexdigest()[:8]
+    name = f"{time.strftime('%Y%m%d-%H%M%S')}-{tag}-{os.path.basename(path)}"
+    target = os.path.join(BACKUP_DIR, name)
+    n = 1
+    while os.path.exists(target):
+        n += 1
+        target = os.path.join(BACKUP_DIR, f"{name}.{n}")
+    _write(target, text, 0o600)
+    return target
 
 
 def _write(path: str, text: str, mode: int) -> None:

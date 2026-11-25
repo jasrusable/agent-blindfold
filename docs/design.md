@@ -100,28 +100,33 @@ Masking runs on everything, but some calls are refused outright:
   the one way an agent changes a dotenv file (`.env`, `.env.*`, `*.env`) it
   may not read; Edit and Write on a protected file stay refused. The guard is
   about reading, not writing, so this command may name a protected file, but
-  only when its first word is this blindfold's launcher (not a script or
-  function of that name) and it has no redirection, variable, glob or
-  substitution (`$(…)`, backticks, `<(…)`, `=(…)`). It:
+  only as the whole command, run by the launcher's absolute path (a bare
+  `blindfold` could be anything the command's own `PATH`, hash table or
+  functions point at), with no redirection, variable, glob or substitution
+  (`$(…)`, backticks, `<(…)`, `=(…)`). It:
   - refuses a value the masker flags (rules, entropy and known values), and a
     value with a line break or control character;
   - refuses keys that change what programs run (`PATH`, `LD_*`, `DYLD_*`,
     `NODE_OPTIONS`, `PYTHON*`, `GIT_*`, `BLINDFOLD_*` and the like), and runs
     only with `BLINDFOLD_CONFIG` and `BLINDFOLD_HOME` unset, so the checks
-    are the user's;
+    are the user's. That list is a denylist: a shell that loads the file
+    (direnv's `dotenv`) also honours names it misses, such as `PAGER` or a
+    `*_BASE_URL` that sends a key elsewhere;
   - won't replace a key named like a secret, or a value that looks like one by
     the rules and entropy or is a known value under another name (every value
     in a dotenv file is a known value under its own name, so that alone
-    doesn't count). No rule can be sure, so before a replace it keeps the
-    previous file as `FILE.blindfold-bak` (`0600`). Backups and its temporary
-    files are protected names agents can't read, and backups are known-secret
-    files;
+    doesn't count). No rule can be sure, so before each replace it keeps the
+    previous file in `~/.config/blindfold/backups/` (folder `0700`, files
+    `0600`), under a new name each time and outside any repository, so a
+    backup is never overwritten or committed. Backups and its temporary files
+    are protected names agents can't read, and backups are known-secret files;
   - reads lines the way dotenv parsers do: ended by `\n` only, skipping lines
     inside a quoted value over several lines. It refuses a quote left open, a
-    key set twice, a `KEY: value` line, `.envrc` (shell code, not data), and
+    key set twice, a `KEY: value` line, `.envrc` (shell code, not data), its
+    own temporary files, and
     blindfold's own files (this copy's and the installed one's) and the agent
     settings, by their real paths;
-  - keeps an `export ` prefix, `\r\n` endings and the file's mode, writes
+  - keeps an `export ` prefix, `\r\n` line endings and the file's mode, writes
     through symlinks and atomically (which replaces hard links and drops
     extended attributes), and makes a new file `0600`. A replaced line loses
     its trailing comment;
