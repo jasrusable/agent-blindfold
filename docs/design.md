@@ -96,6 +96,23 @@ Masking runs on everything, but some calls are refused outright:
   `blindfold install` also writes them as Claude Code `Read(…)`/`Edit(…)` deny
   rules, recorded in `~/.config/blindfold/install-state.json` so a reinstall
   updates only its own rules.
+- **Setting a line in a secret file:** `blindfold env-set FILE KEY VALUE` is
+  the one way an agent changes a dotenv file (`.env`, `.env.*`, `*.env`,
+  `.envrc`) it may not read; Edit and Write on a protected file stay refused.
+  The guard is about reading, not writing, so this command may name a
+  protected file (unless it runs a `$(…)`). It:
+  - refuses a value the masker flags (rules, entropy and known values), so a
+    secret never goes in through it;
+  - never replaces a value that looks like a secret by the rules and entropy,
+    or that is a known value under another name. Known values under the same
+    name don't count: every value in a dotenv file is one. So there's no
+    backup, and secrets stay the user's to change;
+  - refuses a key set twice, a value over several lines, and blindfold's own
+    files and the agent settings, by their real paths;
+  - keeps an `export ` prefix and the file's mode, writes through symlinks and
+    atomically, and makes a new file `0600`;
+  - prints only `KEY added`, `KEY replaced` or `KEY unchanged`, never a line of
+    the file.
 - **Secret-scan bypass:** `--no-verify`, `git commit -n`, `HUSKY=0`, and a
   `core.hooksPath` override or unset (setting it back to `.husky` is fine).
   `block_secret_scan_bypass: false` turns this off.

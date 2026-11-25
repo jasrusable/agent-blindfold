@@ -14,6 +14,7 @@ import re
 from typing import Any, Iterable, List, Optional
 
 from . import shell
+from .cli_paths import LAUNCHER
 from .config import _COMMAND_START, Config
 
 # Prints every variable, or the values a tool loads from a secret file.
@@ -74,7 +75,8 @@ CREDENTIAL_ECHO_REASON = (
 )
 PROTECTED_FILE_REASON = (
     "blindfold: {path} is a secret file, so agents don't read, edit or print it, even masked. Refer to its "
-    "variables by name, or ask the user to make the change (they can type `! <command>`)."
+    "variables by name. To set a line that isn't secret, run `{launcher} env-set FILE KEY VALUE`; for anything "
+    "else, ask the user to make the change (they can type `! <command>`)."
 )
 SCAN_BYPASS_REASON = (
     "blindfold: this command switches off the git hooks that scan commits for secrets ({how}). Fix what the hook "
@@ -144,6 +146,12 @@ def _scan_bypass(texts: List[str]) -> Optional[str]:
     return None
 
 
+def _is_env_set(texts: List[str]) -> bool:
+    """`blindfold env-set FILE KEY VALUE`: writes one line and never shows the file."""
+    args = [text for text in texts[1:] if not text.startswith("-")]
+    return bool(texts) and os.path.basename(texts[0]) == "blindfold" and args[:1] == ["env-set"]
+
+
 def _word_reason(text: str, cwd: Optional[str], patterns: List[str], config: Config, depth: int) -> Optional[str]:
     for part, body, _ in shell.segments(text):
         parsed = shell.words(part)
@@ -156,12 +164,12 @@ def _word_reason(text: str, cwd: Optional[str], patterns: List[str], config: Con
             if config.block_env_dumps and any(re.match(r"^/proc/(?:self|\d+|\$\$|\*)/environ$", t) for t in texts):
                 return ENV_DUMP_REASON
             head = shell.head(part)
-            if head not in _HARMLESS_HEADS:
+            if head not in _HARMLESS_HEADS and not (_is_env_set(texts) and not shell.runs_substitution(part)):
                 for word in texts[1:] if texts else []:
                     candidates = [word] + ([word.split("=", 1)[1]] if "=" in word else [])
                     for candidate in candidates:
                         if protected_match(candidate, patterns, cwd):
-                            return PROTECTED_FILE_REASON.format(path=candidate)
+                            return PROTECTED_FILE_REASON.format(path=candidate, launcher=LAUNCHER)
         # A body still here is one that may run (strip_data_heredocs kept it).
         if body and depth < 3:
             found = _word_reason(body, cwd, patterns, config, depth + 1)
@@ -191,7 +199,7 @@ def reason(tool_input: Any, cwd: Optional[str], config: Config) -> Optional[str]
     for key in _PATH_KEYS:
         value = tool_input.get(key)
         if isinstance(value, str) and protected_match(value, patterns, cwd):
-            return PROTECTED_FILE_REASON.format(path=value)
+            return PROTECTED_FILE_REASON.format(path=value, launcher=LAUNCHER)
     return None
 
 

@@ -47,7 +47,8 @@ It also:
 
 - refuses commands that print a bare secret (1Password reads, Keychain password reads, `*-password` helpers)
 - refuses commands that dump the environment (`printenv`, `env`, `direnv export`) or echo a credential variable
-- refuses reading secret files outright (`.envrc`, `~/.config/*/*.env`, `*.p8`, `.netrc`), and adds matching deny rules
+- refuses reading secret files outright (`.envrc`, `~/.config/*/*.env`, `*.p8`, `.netrc`), and adds matching deny rules;
+  `blindfold env-set` lets an agent set one line that isn't secret in a dotenv file without seeing it
 - refuses switching off the commit hooks' secret scan (`--no-verify`, `git commit -n`, `HUSKY=0`, a `core.hooksPath` override)
 - blocks prompts where you paste a secret by mistake
 - warns you to rotate anything that got through anyway
@@ -79,6 +80,7 @@ that, keep secrets off disk (for example `op run` with `op://` references).
 |---------|------|
 | `blindfold doctor` | Shows config, the secret files found and install state, and exits 1 if the hooks don't fail closed. Never prints values. |
 | `blindfold scan [file]` | Masks a file or stdin. |
+| `blindfold env-set FILE KEY VALUE` | Adds or replaces one `KEY=VALUE` line in a dotenv file and prints only the key and what happened. Refuses a value that looks like a secret, and never replaces one. |
 | `blindfold selftest` | Canary tests, optionally through a real agent. `--installed` tests the hooks your agents actually run; without it, this checkout's. `--fail-closed` adds real sessions with a hook that can't start and with PATH emptied. |
 
 ## Configuration

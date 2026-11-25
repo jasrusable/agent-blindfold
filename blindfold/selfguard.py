@@ -67,7 +67,9 @@ _WRAPPERS = {
 }
 _CHDIR = {"env": ("-C", "--chdir"), "sudo": ("-D", "--chdir")}
 _KEYWORDS = frozenset("if then else elif fi do done while until { } ! esac".split())
-_LAUNCHER_READS = ("doctor", "scan", "hook", "selftest")
+# env-set writes, but refuses blindfold's own files and the agent settings itself,
+# by their real paths, which is surer than following the command's words.
+_LAUNCHER_READS = ("doctor", "scan", "hook", "selftest", "env-set")
 _GIT_READS = frozenset(
     "status log show diff rev-parse describe ls-files ls-tree ls-remote blame grep cat-file rev-list shortlog "
     "show-ref for-each-ref name-rev merge-base whatchanged show-branch count-objects check-ignore check-attr var "

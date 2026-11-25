@@ -53,6 +53,11 @@ and withheld everything. Re-run, or ask the user.
 - **To set or rotate a secret**, give the user the command to run with the value
   read from a secure prompt or a password manager. Don't put a value in it
   yourself.
+- **To set a line that isn't secret** in a dotenv file you may not read (a
+  feature flag, a list of public app ids), run `blindfold env-set FILE KEY VALUE`
+  (the launcher the session note names). It adds or replaces the line and says
+  only which. It refuses a value that looks like a secret, and won't replace
+  one: those are the user's.
 - **Keep placeholders out of files.** If you edit a file containing a
   placeholder, leave that line alone. Writing a placeholder would replace the
   real secret with blindfold's text, and the write is refused anyway.
